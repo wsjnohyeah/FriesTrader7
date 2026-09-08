@@ -1,32 +1,36 @@
 {
-  "_comment": "Hard limits for the Codex + Alpaca paper-trading workflow. The agent may read but must never modify this file during a scheduled run.",
+  "_comment": "Hard limits for the Codex + Alpaca-data + Robinhood-execution workflow. The agent may read but must never modify this file during a scheduled run.",
   "analysis_model": {
     "provider": "openai",
     "model_id": "gpt-6-astra",
     "selection_location": "Codex automation configuration",
     "fallback_allowed": false
   },
-  "broker": {
+  "market_data": {
     "provider": "alpaca",
-    "account_mode": "paper",
-    "trading_api_base_url": "https://paper-api.alpaca.markets/v2",
     "market_data_api_base_url": "https://data.alpaca.markets",
     "market_data_feed": "sip",
     "api_key_env": "ALPACA_API_KEY_ID",
     "api_secret_env": "ALPACA_API_SECRET_KEY",
-    "live_trading_endpoint_prohibited": true,
-    "note": "Credentials are environment variables only. Never place them in this file, a prompt, a log, or a commit. This repository intentionally permits paper trading only."
+    "read_only": true,
+    "note": "Alpaca is used only for SIP quotes, bars, screeners, and news. No Alpaca account, position, or order endpoint may be called. Credentials are environment variables only."
+  },
+  "execution_broker": {
+    "provider": "robinhood_mcp",
+    "account_number": "YOUR_ROBINHOOD_AGENTIC_ACCOUNT_NUMBER",
+    "order_preview_required": true,
+    "note": "Robinhood MCP is the sole source for cash, portfolio, positions, executable quotes, order review, placement, and fill state."
   },
   "starting_capital_usd": 500.0,
   "starting_capital_usd_note": "Set this to net deposits minus withdrawals. Update it manually after funding changes.",
   "execution": {
     "mode": "dry_run",
-    "allowed_modes": ["dry_run", "paper"],
-    "dry_run_min_cycles_before_paper": 10,
-    "note": "Only the human may change dry_run to paper. The agent must never change this value. Real-money/live endpoints are prohibited."
+    "allowed_modes": ["dry_run", "live"],
+    "dry_run_min_cycles_before_live": 10,
+    "note": "Only the human may change dry_run to live. The agent must never change this value. Live orders are placed only through the configured Robinhood MCP account."
   },
   "universe": {
-    "alpaca_watchlist_name": "",
+    "robinhood_watchlist_name": "YOUR_WATCHLIST_NAME_HERE",
     "seed_symbols": [],
     "include_open_positions": true,
     "dynamic_discovery": {
@@ -34,15 +38,25 @@
       "movers_top": 50,
       "most_actives_top": 50,
       "most_actives_by": "volume",
-      "recent_news_limit": 100,
+      "recent_news_limit": 50,
       "max_dynamic_candidates_after_ranking": 40
     },
-    "eligible_exchanges": ["NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"],
     "min_price_usd": 5.0,
     "min_avg_daily_dollar_volume_usd": 20000000,
-    "exclude_otc": true,
-    "require_tradable": true,
-    "note": "Alpaca supplies market data and asset metadata, not a complete fundamentals database. Do not invent market cap, valuation, earnings estimates, or financial ratios."
+    "min_market_cap_usd": 300000000,
+    "max_market_cap_usd": null,
+    "leveraged_etf_filter_enabled": true,
+    "inverse_etf_filter_enabled": true,
+    "note": "Alpaca supplies market data and news, not a complete fundamentals database. Use Robinhood fundamentals or cited primary filings; never invent market cap, valuation, earnings estimates, or financial ratios."
+  },
+  "persistent_candidate_pool": {
+    "enabled": true,
+    "path": "candidate_universe.json",
+    "max_candidates": 100,
+    "default_ttl_calendar_days": 14,
+    "max_upcoming_catalyst_days": 90,
+    "allowed_statuses": ["active_opportunity", "upcoming_catalyst", "monitor", "held"],
+    "note": "This repository-owned pool is independent of the Robinhood watchlist. Each entry needs sourced reasons, a next-review date, and an expiry date."
   },
   "technical_scan": {
     "daily_history_calendar_days": 420,
@@ -81,6 +95,13 @@
       "data_gaps"
     ]
   },
+  "data_crosscheck": {
+    "enabled": true,
+    "max_quote_divergence_pct": 0.01,
+    "max_alpaca_quote_age_seconds": 120,
+    "on_failure": "block_new_entries",
+    "note": "Robinhood ask/bid controls executable sizing; Alpaca SIP is an independent sanity check. A stale or materially divergent Alpaca quote blocks buys but never blocks risk-reducing sells."
+  },
   "position_sizing": {
     "conviction_pct": {"high": 0.20, "medium": 0.12, "low": 0.06},
     "max_position_pct_of_account": 0.20,
@@ -114,14 +135,14 @@
   "loss_limits": {
     "daily_loss_limit_pct_of_account": 0.05,
     "weekly_loss_limit_pct_of_account": 0.10,
-    "include_unrealized_pnl": true,
-    "note": "Use Alpaca portfolio-history account P&L so open-position drawdown is not ignored."
+    "pnl_basis": "robinhood_realized_pnl",
+    "note": "Entry halts use Robinhood realized P&L. Open-position downside is handled separately by mandatory stop checks."
   },
   "wash_sale_avoidance": {
     "enabled": true,
     "lookback_window_days": 30,
-    "scope": "configured_alpaca_account_only",
-    "note": "One Alpaca credential cannot inspect unrelated brokerage accounts. The human remains responsible for cross-account wash-sale tracking."
+    "linked_accounts": ["YOUR_ROBINHOOD_AGENTIC_ACCOUNT_NUMBER"],
+    "note": "List every Robinhood account the MCP can inspect. The human remains responsible for accounts at other brokers."
   },
   "entry_price_gap": {"max_pct": 0.03},
   "entry_extension": {

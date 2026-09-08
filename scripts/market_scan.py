@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build a broad Alpaca candidate universe and compute technical signals.
 
-The script is deterministic: it discovers symbols from Alpaca movers,
-most-actives, an optional Alpaca watchlist, configured seed symbols, and open
-positions; then enriches them with SIP snapshots and daily bars. It prints one
-JSON document and never places orders.
+The script is deterministic: it combines Alpaca movers, most-actives, recent
+news symbols, configured seeds, the persistent candidate pool, and Robinhood
+watchlist/position symbols passed by the caller; then enriches them with SIP
+snapshots and daily bars. It prints one JSON document and never places orders.
 """
 import argparse
 import datetime as dt
@@ -14,7 +14,7 @@ import statistics
 import sys
 from pathlib import Path
 
-from alpaca_api import AlpacaClient, AlpacaError
+from alpaca_api import AlpacaClient, AlpacaError, csv_symbols
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,7 +80,7 @@ def snapshot_map(payload):
     return payload if isinstance(payload, dict) else {}
 
 
-def collect_symbols(client, rules):
+def collect_symbols(client, rules, held_symbols, watchlist_symbols, candidate_symbols):
     sources = {}
 
     def add(symbol, source):
@@ -91,18 +91,13 @@ def collect_symbols(client, rules):
     for symbol in universe.get("seed_symbols", []):
         add(symbol, "seed")
 
-    positions = client.trading_get("/positions") if universe.get("include_open_positions", True) else []
-    for position in positions:
-        add(position.get("symbol"), "held")
-
-    watchlist_name = universe.get("alpaca_watchlist_name", "").strip()
-    if watchlist_name:
-        for watchlist in client.trading_get("/watchlists"):
-            if watchlist.get("name") == watchlist_name:
-                detail = client.trading_get(f"/watchlists/{watchlist['id']}")
-                for asset in detail.get("assets", []):
-                    add(asset.get("symbol"), "watchlist")
-                break
+    if universe.get("include_open_positions", True):
+        for symbol in held_symbols:
+            add(symbol, "held")
+    for symbol in watchlist_symbols:
+        add(symbol, "watchlist")
+    for symbol in candidate_symbols:
+        add(symbol, "persistent_pool")
 
     discovery = universe["dynamic_discovery"]
     if discovery.get("enabled", True):
@@ -133,7 +128,7 @@ def collect_symbols(client, rules):
             for symbol in article.get("symbols", []):
                 add(symbol, "recent_news")
 
-    return sources, positions
+    return sources
 
 
 def fetch_market_data(client, symbols, history_days):
@@ -159,7 +154,7 @@ def fetch_market_data(client, symbols, history_days):
     return snapshots, bars
 
 
-def evaluate(symbol, sources, asset, snapshot, history, rules, held):
+def evaluate(symbol, sources, snapshot, history, rules, held):
     universe = rules["universe"]
     technical = rules["technical_scan"]
     current_bar = snapshot.get("dailyBar") or {}
@@ -218,11 +213,6 @@ def evaluate(symbol, sources, asset, snapshot, history, rules, held):
         failed.append("missing_current_price")
     elif price < universe["min_price_usd"]:
         failed.append("below_min_price")
-    if universe.get("require_tradable", True) and not asset.get("tradable", False):
-        failed.append("not_tradable")
-    exchange = asset.get("exchange")
-    if exchange and exchange not in universe.get("eligible_exchanges", []):
-        failed.append("ineligible_exchange")
     if average_dollar_volume_20d is None:
         failed.append("missing_liquidity_history")
     elif average_dollar_volume_20d < universe["min_avg_daily_dollar_volume_usd"]:
@@ -265,11 +255,6 @@ def evaluate(symbol, sources, asset, snapshot, history, rules, held):
         "symbol": symbol,
         "sources": sorted(sources),
         "held": held,
-        "asset": {
-            "name": asset.get("name"), "exchange": exchange,
-            "tradable": asset.get("tradable"), "fractionable": asset.get("fractionable"),
-            "shortable": asset.get("shortable"), "easy_to_borrow": asset.get("easy_to_borrow"),
-        },
         "passed_filters": passed_filters,
         "filter_failures": failed,
         "signals": [name for name, triggered in signal_tests.items() if triggered],
@@ -279,18 +264,18 @@ def evaluate(symbol, sources, asset, snapshot, history, rules, held):
     }
 
 
-def scan(rules):
+def scan(rules, held_symbols, watchlist_symbols, candidate_symbols):
     client = AlpacaClient()
-    sources, positions = collect_symbols(client, rules)
-    assets_payload = client.trading_get("/assets", {"status": "active", "asset_class": "us_equity"})
-    assets = {asset.get("symbol"): asset for asset in assets_payload}
+    sources = collect_symbols(
+        client, rules, held_symbols, watchlist_symbols, candidate_symbols
+    )
     snapshots, histories = fetch_market_data(
         client, sources, rules["technical_scan"]["daily_history_calendar_days"]
     )
-    held_symbols = {position.get("symbol") for position in positions}
+    held_symbols = set(held_symbols)
     candidates = [
         evaluate(
-            symbol, source_set, assets.get(symbol, {}), snapshots.get(symbol, {}),
+            symbol, source_set, snapshots.get(symbol, {}),
             histories.get(symbol, []), rules, symbol in held_symbols,
         )
         for symbol, source_set in sources.items()
@@ -299,7 +284,7 @@ def scan(rules):
 
     dynamic_limit = rules["universe"]["dynamic_discovery"]["max_dynamic_candidates_after_ranking"]
     protected = [row for row in candidates if row["held"] or any(
-        source in row["sources"] for source in ("seed", "watchlist")
+        source in row["sources"] for source in ("seed", "watchlist", "persistent_pool")
     )]
     dynamic = [row for row in candidates if row not in protected and row["selected_for_research"]]
     kept_symbols = {row["symbol"] for row in protected + dynamic[:dynamic_limit]}
@@ -317,11 +302,20 @@ def scan(rules):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "risk_rules.json")
+    parser.add_argument("--held-symbols", type=csv_symbols, default=[],
+                        help="comma-separated symbols from Robinhood MCP positions")
+    parser.add_argument("--watchlist-symbols", type=csv_symbols, default=[],
+                        help="comma-separated symbols from the configured Robinhood watchlist")
+    parser.add_argument("--candidate-symbols", type=csv_symbols, default=[],
+                        help="comma-separated symbols from candidate_universe.json")
     args = parser.parse_args()
     try:
         with args.config.open(encoding="utf-8") as handle:
             rules = json.load(handle)
-        print(json.dumps(scan(rules), separators=(",", ":")))
+        print(json.dumps(
+            scan(rules, args.held_symbols, args.watchlist_symbols, args.candidate_symbols),
+            separators=(",", ":"),
+        ))
     except (AlpacaError, KeyError, OSError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 1

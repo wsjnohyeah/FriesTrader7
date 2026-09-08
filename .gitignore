@@ -6,6 +6,3 @@
 __pycache__/
 *.pyc
 logs/
-pending_proposals.jsonl
-trade_log.jsonl
-trade_log_recent.md

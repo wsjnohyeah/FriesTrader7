@@ -1,230 +1,253 @@
-# FriesTrader7 — Codex + Alpaca paper-trading workflow
+# FriesTrader7 — GPT-6 Astra + Alpaca data + Robinhood execution
 
-FriesTrader7 is a two-phase, auditable AI trading workflow. Codex performs
-after-close market discovery and evidence-based analysis; deterministic Python
-scripts enforce entry, exit, ranking, and sizing rules; Alpaca supplies SIP
-market data, news, account state, and paper order execution.
+FriesTrader7 is a two-phase, auditable trading workflow:
 
-This repository is intentionally paper-only. It is a research and automation
-template, not evidence that LLM-selected stocks outperform an index.
+- Codex running `gpt-6-astra` researches and synthesizes decisions.
+- Alpaca Pro/SIP is a read-only professional market-data and news source.
+- Robinhood Agentic Trading MCP is the only account and order interface.
+- Deterministic Python scripts enforce technical scanning and risk math.
+
+This is a template, not evidence that LLM stock selection beats an index. Keep
+it in `dry_run` until you have inspected enough complete cycles yourself.
 
 ## Architecture
 
 ```text
-Alpaca movers + most actives + watchlist + open positions
+Alpaca whole-market movers / most-active / news / SIP bars
+Robinhood watchlist + Robinhood positions
+Persistent candidate_universe.json
                          │
                          ▼
- Phase A (after close, Codex gpt-6-astra)
- dynamic scan → technical metrics → news/filing research → detailed thesis
+ Phase A after close — GPT-6 Astra
+ discovery → technical scan → detailed news/filing thesis
                          │
-                         ▼
-              pending_proposals.jsonl
-                         │
-                         ▼
- Phase B (after next open, Codex gpt-6-astra)
- fresh prices → exits → entry gates → ranking/sizing → paper orders
-                         │
-                         ▼
-          trade_log.jsonl + trade_log_recent.md
+            ┌────────────┴────────────┐
+            ▼                         ▼
+ pending_proposals.jsonl    candidate_universe.json
+            │
+            ▼
+ Phase B after next open — GPT-6 Astra
+ Robinhood positions/quotes → exits → entry gates → sizing
+            │
+            ▼
+ Robinhood review → gated Robinhood order → fill confirmation
+            │
+            ▼
+ trade_log.jsonl + trade_log_recent.md
 ```
 
-The selected model is configured in the Codex automation, not inside a prompt.
-The task specifications require `gpt-6-astra` and instruct the run to report a
-configuration error if that model is unavailable rather than silently using a
-different provider.
+Alpaca account cash, positions, buying power, P&L, and orders are never used.
+The Alpaca helper implements GET-only market-data calls and has no order
+command. The paper endpoint is unnecessary for this architecture; Alpaca Pro
+market data is served from `https://data.alpaca.markets`.
 
-This is the Codex-native integration path: the scheduled Codex task itself is
-the GPT-6 Astra agent. It does not require an OpenAI API key in the repository.
-If you later replace Codex scheduling with a standalone service that calls the
-OpenAI Responses API, that service will need a separate `OPENAI_API_KEY` and
-API billing; a ChatGPT subscription and API usage are separate products.
+## Broad, independent candidate discovery
 
-## What is deterministic
+The tradable research universe is not bounded by the Robinhood watchlist or
+current holdings. Every Phase A run merges:
 
-The model researches and synthesizes evidence. It does not decide risk math:
+- Alpaca whole-market top gainers and losers;
+- Alpaca whole-market most-active stocks;
+- symbols attached to the latest market-wide Alpaca news;
+- the repository's persistent candidate pool;
+- optional configured seed symbols;
+- the Robinhood watchlist;
+- every current Robinhood position.
 
-- `market_scan.py` discovers broad-market candidates and computes technicals.
-- `entry_gate.py` enforces gap, extension, wash-sale, and re-entry locks.
-- `stop_loss.py` computes fixed or volatility-scaled stops.
-- `take_profit.py` computes cascading partial exits.
-- `conviction_trim.py` mechanically reduces persistent low-conviction exposure.
-- `pnl_pct.py` enforces daily and weekly account-loss limits.
-- `rank_candidates.py` ranks by conviction, risk flags, and technical score.
-- `position_sizing.py` applies position, slot, cash-buffer, and top-up limits.
-- `validate_proposals.py` prevents incomplete detailed theses from being
-  published to Phase B.
+The scanner calculates daily movement, opening gap, intraday range, relative
+volume, average dollar volume, 20-day momentum/breakout, SMA20/50/200, RSI14,
+and ATR14 percentage. Dynamic names are ranked by a disclosed signal score.
+
+`candidate_universe.json` keeps opportunities across days without modifying
+the Robinhood watchlist. Entries are categorized as:
+
+- `active_opportunity`: actionable technical/news setup now;
+- `upcoming_catalyst`: a sourced future earnings, product, regulatory, legal,
+  or other date-specific event;
+- `monitor`: a developing thesis that is not actionable yet;
+- `held`: an existing Robinhood position that must always be reviewed.
+
+Every non-held entry has a sourced reason, next-review date, and expiration.
+`universe_manager.py` validates, deduplicates, expires, and caps the list, so it
+does not grow forever or preserve stale ideas indefinitely.
+
+## Detailed GPT-6 Astra analysis
+
+Each researched stock requires:
+
+- executive summary and exact conviction rationale;
+- catalyst chronology and confirmation status;
+- source-by-source evidence with publication time and URL;
+- technical trend, momentum, volume, volatility, and observed levels;
+- explicit bull case and strongest bear case;
+- concrete thesis invalidation conditions;
+- fixed risk flags and unresolved data gaps.
+
+At least two independent sources are required by default. High conviction
+requires a confirmed company-specific catalyst, a primary or wire source,
+independent corroboration, supportive technical structure, and no unresolved
+material risk flag or data gap. `validate_proposals.py` prevents incomplete
+records from reaching Phase B.
+
+The model is selected in the Codex automation, not by repository text. Set the
+automation model to `gpt-6-astra`. The task reports an error rather than
+silently switching to Claude or another model.
+
+## Data boundaries
+
+Alpaca Pro supplies high-quality trades, quotes, bars, screeners, and news, but
+it is not a complete fundamentals database. Never infer market cap, valuation,
+earnings estimates, revenue, margins, or balance-sheet data from price bars.
+Robinhood fundamentals and cited primary filings may supply verified facts;
+otherwise they are recorded as data gaps.
+
+For execution, Robinhood's bid/ask is authoritative because that is where the
+order will be sent. Alpaca SIP is independently compared with it. A stale or
+materially divergent Alpaca quote blocks a buy and creates an audit entry, but
+never blocks a risk-reducing sell.
+
+## Deterministic components
+
+- `scripts/alpaca_api.py`: read-only Alpaca data client.
+- `scripts/market_scan.py`: broad discovery and technical metrics.
+- `scripts/universe_manager.py`: persistent opportunity-pool lifecycle.
+- `scripts/validate_proposals.py`: detailed thesis contract.
+- `scripts/entry_gate.py`: gap, extension, wash-sale, and re-entry locks.
+- `scripts/stop_loss.py`: fixed or volatility-scaled stops.
+- `scripts/take_profit.py`: cascading partial exits.
+- `scripts/conviction_trim.py`: persistent low-conviction reduction.
+- `scripts/pnl_pct.py`: Robinhood daily/weekly realized-loss entry halt.
+- `scripts/rank_candidates.py`: conviction, risk, technical-score ranking.
+- `scripts/position_sizing.py`: position, cash, slot, and top-up limits.
 
 All scripts use the Python standard library.
 
-## Broader stock discovery
+## Credentials
 
-Phase A is not limited to a hand-maintained watchlist. Every run merges:
-
-- Alpaca whole-market gainers and losers;
-- Alpaca whole-market most-active stocks;
-- symbols in the latest market-wide Alpaca news feed;
-- an optional Alpaca watchlist;
-- optional seed symbols in `risk_rules.json`;
-- every current position.
-
-It then uses SIP snapshots and adjusted history to calculate:
-
-- daily movement and opening gap;
-- intraday high/low range;
-- relative volume and average dollar volume;
-- 20-day momentum and breakout;
-- SMA20/SMA50/SMA200;
-- RSI14 and ATR14 percentage.
-
-Dynamic candidates are ranked by a disclosed technical signal score. Open
-positions are always retained. Thresholds and source caps are configurable in
-`risk_rules.json`.
-
-Alpaca Pro market data is not a complete company-fundamentals service. The
-workflow must not invent market cap, P/E, earnings estimates, balance-sheet
-figures, or similar data. Verified filing facts may be used when cited;
-otherwise the missing item is recorded under `data_gaps`.
-
-## More detailed LLM analysis
-
-Each researched symbol now requires:
-
-- a decision-oriented executive summary;
-- catalyst chronology and confirmation status;
-- source-by-source news evidence with timestamps and URLs;
-- trend, momentum, volume, volatility, and observed technical levels;
-- explicit bull and bear cases;
-- concrete invalidation conditions;
-- fixed risk flags;
-- material data gaps;
-- an explanation for the exact conviction tier.
-
-At least two independent sources are required by default. High conviction also
-requires a confirmed company-specific catalyst, a primary or wire source,
-corroboration, a supportive technical setup, and no unresolved material risk
-flag or data gap.
-
-## Alpaca authentication
-
-Never put credentials in this repository or in a scheduled prompt. Create or
-rotate an Alpaca paper API key and expose both values to the Codex runtime:
+The Alpaca key previously posted in a chat should be considered exposed and
+rotated. Do not commit the replacement. Inject the new pair through the Codex
+runtime or secret manager:
 
 ```bash
 export ALPACA_API_KEY_ID='your_new_key_id'
 export ALPACA_API_SECRET_KEY='your_new_secret'
-export ALPACA_TRADING_BASE_URL='https://paper-api.alpaca.markets/v2'
 export ALPACA_DATA_BASE_URL='https://data.alpaca.markets'
 export ALPACA_DATA_FEED='sip'
 ```
 
-`.env` files are ignored, but the provided Python tools deliberately do not
-auto-load them. Your scheduler or secret manager should inject the environment.
-Avoid shell tracing (`set -x`) when secrets are present.
+`.env` is ignored, but the scripts do not automatically load it. Avoid shell
+tracing while credentials are present.
 
-Verify read-only access:
+The Robinhood MCP connection must be available to the scheduled Codex task,
+not only to an unrelated interactive ChatGPT conversation. Do not store
+Robinhood credentials in this repository.
+
+## Initial setup
+
+1. Keep the GitHub repository private.
+2. Merge this migration branch.
+3. Rotate the exposed Alpaca key and configure both new environment variables.
+4. In `risk_rules.json`, set
+   `execution_broker.account_number` and
+   `universe.robinhood_watchlist_name`.
+5. Add every inspectable Robinhood account to
+   `wash_sale_avoidance.linked_accounts`.
+6. Set `starting_capital_usd` to net deposits minus withdrawals.
+7. Review all discovery, sizing, stop, profit-taking, and loss thresholds.
+8. Leave `execution.mode` as `dry_run`.
+
+Test Alpaca data access without printing environment variables:
 
 ```bash
-python3 scripts/alpaca_api.py account
-python3 scripts/alpaca_api.py clock
 python3 scripts/alpaca_api.py movers --top 10
-python3 scripts/market_scan.py > market_scan_latest.json
+python3 scripts/alpaca_api.py most-actives --top 10
+python3 scripts/alpaca_api.py snapshots --symbols AAPL,MSFT
 ```
 
-The client never prints credentials. Its order command requires
-`--confirm-paper` and independently refuses any non-paper hostname.
+Then test the scanner with symbols obtained through Robinhood MCP:
 
-## Initial configuration
+```bash
+python3 scripts/market_scan.py \
+  --held-symbols 'AAPL' \
+  --watchlist-symbols 'MSFT,NVDA' \
+  --candidate-symbols ''
+```
 
-Edit `risk_rules.json` manually before scheduling:
+An empty optional list can be omitted entirely.
 
-1. Set `starting_capital_usd` to net deposits minus withdrawals.
-2. Optionally set `universe.alpaca_watchlist_name` and `seed_symbols`.
-3. Review dynamic-discovery, liquidity, and technical thresholds.
-4. Review all position sizing, stop, take-profit, and account loss limits.
-5. Keep `execution.mode` at `dry_run` for at least the configured number of
-   distinct cycles.
-6. Only after reviewing every log should a human change the mode to `paper`.
+## Scheduling in Codex
 
-`paper` means simulated Alpaca orders. This repository prohibits the live
-Alpaca endpoint.
+Create two separate Codex automations, give both the GitHub checkout, Alpaca
+environment secrets, Robinhood MCP connection, and model `gpt-6-astra`.
 
-## Scheduling with Codex
+Suggested schedules in `America/New_York`:
 
-Create two separate Codex automations pointed at your private repository and
-select `gpt-6-astra` for both:
-
-- Phase A: weekdays after the US close, for example 4:30 PM America/New_York.
-- Phase B: weekdays about five minutes after the open, for example 9:35 AM
-  America/New_York.
+- Phase A: weekdays at 4:30 PM, after the regular close.
+- Phase B: weekdays at 9:35 AM, after the regular open.
 
 Phase A prompt:
 
 ```text
-Read AGENTS.md and execute PHASE_A_TASK.md exactly. Use the current checkout as
-the source of truth. Do not place, replace, or cancel orders. Commit and push
-only the output files named by the task specification.
+Read AGENTS.md and execute PHASE_A_TASK.md exactly. Alpaca is read-only and
+Robinhood order tools are forbidden in this phase. Commit and push only the
+named output files.
 ```
 
 Phase B prompt:
 
 ```text
-Read AGENTS.md and execute PHASE_B_TASK.md exactly. Use the current checkout as
-the source of truth. Paper orders are authorized only when every gate in the
-task specification passes. Never use a live Alpaca endpoint. Commit and push
-only the output files named by the task specification.
+Read AGENTS.md and execute PHASE_B_TASK.md exactly. Alpaca is data-only.
+Robinhood MCP is the only account and order route. A live order is authorized
+only when every documented gate passes. Commit and push only the named logs.
 ```
 
-Use only one scheduler for each phase. Concurrent duplicate Phase B runs can
-produce duplicate decisions; deterministic client order IDs reduce but do not
-eliminate the need for single-run scheduling.
+Use only one scheduler per phase. Give Phase A enough time to finish and push
+well before Phase B starts the next morning.
 
-## Main configuration defaults
+## Moving from dry run to Robinhood execution
 
-The checked-in defaults are illustrative:
+Every Phase B run ends with one `cycle_summary`. Distinct successful dry-run
+dates are counted. After at least the configured minimum—10 by default—review:
+
+- rejected as well as approved candidates;
+- source quality and thesis/data gaps;
+- Alpaca versus Robinhood quote differences;
+- all stop-loss and take-profit calculations;
+- position sizing, cash buffer, and duplicate-order behavior;
+- the final `trade_log.jsonl` against Robinhood account history.
+
+Only the human may then change `execution.mode` from `dry_run` to `live`.
+The agent must never make that change itself.
+
+## Default limits
 
 | Rule | Default |
 |---|---:|
-| Dynamic mover candidates | 50 gainers/losers feed |
-| Most-active candidates | 50 |
-| Dynamic names researched | 20 |
+| Dynamic mover input | top 50 |
+| Most-active input | top 50 |
+| Recent news items | 50 |
+| Dynamic names researched per cycle | 20 |
+| Persistent non-held pool cap | 100 |
 | Minimum price | $5 |
 | Minimum 20-day dollar volume | $20M/day |
-| Daily move trigger | 3% |
-| Opening gap trigger | 2% |
-| Intraday range trigger | 3.5% |
-| Relative volume trigger | 1.5× |
-| High/medium/low target | 20% / 12% / 6% |
-| Maximum simultaneous positions | 4 |
-| Minimum cash buffer | 10% |
-| Daily/weekly entry halt | 5% / 10% |
+| Daily move / opening gap trigger | 3% / 2% |
+| Intraday range / relative volume trigger | 3.5% / 1.5× |
+| High / medium / low target | 20% / 12% / 6% |
+| Maximum positions / cash reserve | 4 / 10% |
+| Daily / weekly realized-loss entry halt | 5% / 10% |
 
-These are not recommendations.
+These values are examples, not recommendations.
 
-## State and audit trail
+## Limitations
 
-- `pending_proposals.jsonl` is replaced by each successful Phase A run.
-- `trade_log.jsonl` is append-only and controls idempotency, dry-run count,
-  take-profit state, and re-entry state.
-- `trade_log_recent.md` is only a readable recap; the JSONL log wins if they
-  disagree.
-- `market_scan_latest.json` preserves the exact scanner inputs used by Phase A.
-
-Each cloud run commits its output back to the repository so a fresh later run
-can reconstruct state without relying on local memory.
-
-## Important limitations
-
-- The workflow checks risk on its schedule, not continuously throughout the
-  trading day. It cannot protect against all intraday or overnight gaps.
-- LLM news analysis can be incomplete or wrong even with detailed sourcing.
-- Alpaca news coverage is not exhaustive; primary-source verification still
-  matters.
-- One credential can inspect only its Alpaca account. Cross-broker wash-sale
-  tracking remains the user's responsibility.
-- Paper fills do not perfectly reproduce live liquidity, slippage, or market
-  impact.
+- Scheduled checks are not continuous risk monitoring.
+- LLM research can still omit, misunderstand, or overweight information.
+- Alpaca news coverage and Robinhood fundamentals are not exhaustive.
+- Market-data feeds can differ briefly; the workflow rejects rather than
+  averages unexplained buy-side discrepancies.
+- Wash-sale visibility is limited to accounts the Robinhood MCP can inspect.
 - Git is an audit/state mechanism, not a transactional trading database.
-- No backtest in this repository validates the news-driven selection logic.
+- No backtest here validates news-driven stock selection.
 
 ## License
 

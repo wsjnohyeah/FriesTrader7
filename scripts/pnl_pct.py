@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # Part of FriesTrader (https://github.com/YizhiSong/FriesTrader)
 # Copyright (c) 2026 Yizhi Song, MIT License -- see LICENSE
-"""Compute account P&L percentages and the entry-halt decision.
+"""Compute Robinhood realized-P&L percentages and the entry-halt decision.
 
-The Alpaca workflow supplies daily and weekly account profit/loss from
-portfolio-history. Both realized and unrealized moves are therefore included.
-The denominator remains the human-maintained starting_capital_usd.
+Phase B supplies daily and weekly realized profit/loss from Robinhood MCP. The
+denominator remains the human-maintained starting_capital_usd.
 """
 import argparse
 import json
@@ -16,10 +15,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--daily-pnl-usd", "--daily-realized-usd", dest="daily_pnl_usd",
                    type=float, required=True,
-                   help="daily account P&L from Alpaca portfolio-history")
+                   help="daily realized P&L from Robinhood MCP")
     p.add_argument("--weekly-pnl-usd", "--weekly-realized-usd", dest="weekly_pnl_usd",
                    type=float, required=True,
-                   help="weekly account P&L from Alpaca portfolio-history")
+                   help="weekly realized P&L from Robinhood MCP")
     p.add_argument("--starting-capital-usd", type=float, required=True,
                     help="risk_rules.json starting_capital_usd")
     p.add_argument("--daily-limit-pct", type=float, required=True,

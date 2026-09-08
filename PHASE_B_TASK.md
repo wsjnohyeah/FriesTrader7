@@ -1,195 +1,187 @@
-# Phase B — Revalidation, risk enforcement, and Alpaca paper orders (Codex)
+# Phase B — Revalidation, risk enforcement, and Robinhood execution (Codex)
 
-Run this task approximately five minutes after the US regular session opens.
-It consumes Phase A's proposals, processes exits before entries, and produces
-an append-only audit trail.
+Run approximately five minutes after the US regular session opens. Alpaca SIP
+provides research-grade market data and news; Robinhood MCP is the only source
+of account state and the only permitted order route.
 
 ## Runtime and security contract
 
-- Run in Codex with the automation's model set to `gpt-6-astra`.
-- If that model is unavailable, stop and report the configuration problem;
-  never silently switch to Claude or another model.
+- Run in Codex with the automation model set to `gpt-6-astra`.
+- If that model is unavailable, report the configuration problem; do not
+  silently substitute Claude or another model.
 - Read `risk_rules.json`, `pending_proposals.jsonl`, and `trade_log.jsonl`
-  fresh. Never modify risk rules during a run.
-- Credentials come only from `ALPACA_API_KEY_ID` and
-  `ALPACA_API_SECRET_KEY`. Never display, log, or commit them.
-- Orders may target `https://paper-api.alpaca.markets/v2` only. A live Alpaca
-  endpoint is prohibited even when `execution.mode` is `paper`.
-- Alpaca has no Robinhood-style order-preview endpoint. The local preflight
-  checks below replace preview, and `alpaca_api.py` independently rejects any
-  order call not aimed at the paper hostname.
+  fresh. Never modify risk rules during a scheduled run.
+- Read Alpaca credentials only from `ALPACA_API_KEY_ID` and
+  `ALPACA_API_SECRET_KEY`; never display, log, or commit them.
+- Alpaca is read-only. Never call an Alpaca account, position, order, cancel,
+  or trading endpoint. `scripts/alpaca_api.py` intentionally exposes GET-only
+  market-data commands.
+- Robinhood MCP is the sole source for portfolio, cash, positions, executable
+  bid/ask, order review, order placement, and fill confirmation.
 
 ## Step 0 — Load state and enforce idempotency
 
-Get the actual US/Eastern time, then call `alpaca_api.py clock`. Continue only
-on a scheduled trading day after the regular session has opened.
+Determine the real US/Eastern date, weekday, and time through the shell. Use
+Robinhood market-hours data when available to confirm that this is a trading
+day and the regular session is open.
 
-Read all proposal lines with `stage == "thesis"`. If the file is missing or
-empty, append one zero-count `cycle_summary` and stop.
+Read every `stage == "thesis"` proposal. If the file is missing or empty,
+append a zero-count `cycle_summary` and stop.
 
-For each symbol, skip proposal processing when `trade_log.jsonl` already
-contains a `risk_check` or `order` with the same symbol and `proposal_date`.
-The proposal's date—not today's date—is the idempotency key. Stop-loss and
-take-profit checks are exempt and run every cycle for every open position.
+Skip proposal processing when `trade_log.jsonl` already contains a
+`risk_check` or `order` for the same symbol and `proposal_date`. The proposal's
+own date—not today's date—is the idempotency key. Stop-loss and take-profit
+checks still run every cycle for every live position.
 
-Count distinct dates having a `cycle_summary` with `mode == "dry_run"`. This
-must be at least `execution.dry_run_min_cycles_before_paper` before paper
-orders are permitted.
+Count distinct dates having a `cycle_summary` with `mode == "dry_run"`. At
+least `execution.dry_run_min_cycles_before_live` are required before the live
+gate can open.
 
-## Step 1 — Load current Alpaca state
+## Step 1 — Load Robinhood account state
 
-Run and parse:
+Using `execution_broker.account_number`, call Robinhood MCP for:
 
-```bash
-python3 scripts/alpaca_api.py account
-python3 scripts/alpaca_api.py positions
-python3 scripts/alpaca_api.py orders --status open
-```
+- portfolio total value and cash;
+- all open equity positions;
+- open/recent equity orders needed for duplicate detection;
+- fresh equity quotes.
 
-Fail closed if account or position state cannot be read: write an error
-`cycle_summary`, do not submit orders, and preserve existing logs.
+If portfolio or position state cannot be obtained, fail closed: append an
+error summary and submit no orders. Never substitute values from Alpaca's
+paper account. Alpaca paper cash, positions, buying power, and P&L have no role
+in this workflow.
 
-Classify each unprocessed proposal using this initial position snapshot:
+Classify each unprocessed proposal against the initial Robinhood position
+snapshot:
 
 - `avoid`: no further candidate processing;
 - `exit_existing`: sell candidate;
 - `long` with an open position: held/top-up candidate;
 - `long` without an open position: new candidate.
 
-Keep that classification fixed for the cycle so a same-cycle sell cannot turn
+Keep this classification fixed for the cycle so a same-cycle sale cannot turn
 a held symbol into a new-entry candidate.
 
-## Step 2 — Run sell-side checks first
+## Step 2 — Process every Robinhood position before buys
 
-For every open position, obtain a current SIP snapshot and adjusted daily bars.
-Use Alpaca `avg_entry_price`, `qty`, `market_value`, and the current bid/last
-price as inputs. Do not ask the model to recompute script results.
+For every open equity position, use its Robinhood average cost and quantity.
+Use a fresh Robinhood bid as the conservative executable price. Pull adjusted
+daily bars from Alpaca SIP for volatility and trailing-high calculations.
 
 ### Stop loss
 
-Run `scripts/stop_loss.py` with the fresh position and bar inputs. In
-`volatility_scaled` mode the stop is:
+Run `scripts/stop_loss.py`. In volatility-scaled mode:
 
 ```text
-clamp(volatility_stdev_multiplier × sample stdev of daily returns,
-      min_stop_pct, max_stop_pct)
+stop_pct = clamp(multiplier × sample stdev of daily close returns,
+                 configured minimum, configured maximum)
 ```
 
-Use the fallback stop when there are fewer than 10 usable daily bars. Before
-any take-profit tier has fired in the current holding period, the reference is
-average cost. After a tier fires, pass holding-period daily highs so the
-reference becomes the trailing high.
+Use the configured fallback if there are fewer than 10 usable bars. Before a
+take-profit tier has fired in the current holding period, the reference is the
+Robinhood average cost. Afterwards, pass Alpaca holding-period daily highs so
+the reference becomes the trailing high.
 
-A triggered stop schedules a full-position sell. A positive thesis cannot
-cancel it.
+A triggered stop schedules a full-position sell. Neither a bullish thesis nor
+an Alpaca/Robinhood quote disagreement may block a risk-reducing sell.
 
 ### Tiered take profit
 
-Run `scripts/take_profit.py` with average cost, current price, quantity,
-configured tiers, and tiers already fired during this holding period. The
-script handles multiple newly crossed tiers and cascading remaining quantity.
+Run `scripts/take_profit.py` with Robinhood average cost, fresh Robinhood bid,
+quantity, configured tiers, and tiers already fired during this holding
+period. Use its cascading quantities verbatim.
 
 ### Conviction trim
 
-For a held symbol that has a current proposal, use the proposal conviction and
-the corresponding target percentage from `position_sizing.conviction_pct`.
-Run `scripts/conviction_trim.py`. If low conviction and material overweight
-persist for the configured number of consecutive cycles, schedule the returned
-partial sell.
+For held symbols with a current proposal, compute the tier target from the
+fresh Robinhood total account value and run `scripts/conviction_trim.py`.
 
-If any sell-side risk script fails, do not guess. Do not sell that symbol from
-the failed calculation, halt all entries for the cycle, and log
+If any sell-side risk script fails, do not improvise: exclude that symbol from
+an automated sell, halt every new entry/top-up for this cycle, and log
 `halt_entries_check_manually`.
 
-An `exit_existing` proposal schedules a full-position sell independently of
-the three mechanical checks. Never create duplicate sell quantities: a full
-stop/exit takes precedence over partial take-profit or trim orders.
+An `exit_existing` thesis also schedules a full exit. A full stop/exit takes
+precedence over partial take-profit or trim quantities so duplicate sell
+orders cannot be created.
 
-## Step 3 — Paper-order preflight and sell execution
+## Step 3 — Review and execute sells through Robinhood MCP
 
-Before every proposed order verify all of the following:
+Before each sell, confirm:
 
-- account `status` is `ACTIVE`;
-- `trading_blocked`, `account_blocked`, and `trade_suspended_by_user` are false;
-- the asset is active and tradable;
-- the latest quote is present and not stale;
-- quantity/notional is positive and compatible with `fractionable`;
-- no open order would duplicate or conflict with this symbol and side;
-- the order will not exceed the position quantity for a long-only sell;
-- the calculated order matches the logged risk decision exactly.
+- the account and position still match the earlier snapshot;
+- the quantity is positive and no larger than the current position;
+- no existing Robinhood order conflicts with this sale;
+- the symbol, side, quantity, and reason match the logged decision.
 
-Then apply the paper-order gate. All conditions must be true:
+Always call `review_equity_order` first. If it returns a blocking alert, log it
+verbatim and do not place the order.
 
-1. `execution.mode == "paper"`;
-2. the configured trading URL hostname is exactly `paper-api.alpaca.markets`;
-3. the dry-run cycle count has reached its configured minimum;
-4. all local preflight checks passed.
+The live-order gate requires all of:
 
-If mode is `dry_run`, log `would_execute: true` but never call the order
-command. If mode is `paper` but another gate condition fails, log the precise
-blocker and do not submit.
+1. `execution.mode == "live"`;
+2. at least the configured number of distinct dry-run cycles;
+3. a non-blocking Robinhood order review;
+4. fresh Robinhood account, position, and quote data;
+5. no duplicate/conflicting Robinhood order.
 
-When open, submit a day market sell with a unique deterministic
-`client_order_id` containing the proposal date, symbol, side, reason, and cycle
-identifier:
+In `dry_run`, log `would_execute: true` and never call
+`place_equity_order`. If live mode is configured but any gate fails, log the
+exact blocker.
 
-```bash
-python3 scripts/alpaca_api.py order --symbol XXXX --side sell --qty QTY \
-  --type market --time-in-force day --client-order-id ID --confirm-paper
-```
+When the gate is open, call Robinhood `place_equity_order` with exactly the
+reviewed parameters. Confirm the result using `get_equity_orders` and the
+returned order id. If not terminal, wait approximately 15 seconds and check
+once more. Never poll more than twice and never label an unconfirmed order as
+filled. Log estimated bid/quantity and actual order state/fill separately.
 
-Poll `alpaca_api.py order-status --id ID` at most twice, about 15 seconds apart.
-Log the Alpaca order id, client order id, status, filled quantity, average fill
-price, and the pre-trade bid. Never represent `accepted` or `new` as `filled`.
+Loss-limit and wash-sale rules never block a risk-reducing sell. For a sell at
+a loss, inspect every configured `wash_sale_avoidance.linked_accounts` account
+for a surviving replacement lot and log a possible wash-sale warning when
+appropriate.
 
-Selling is never blocked by the entry loss limit or wash-sale avoidance. If a
-loss sale leaves a replacement position in this configured Alpaca account,
-record a possible wash-sale warning. Other brokerage accounts remain outside
-this system's visibility.
+After sell processing, re-pull Robinhood portfolio, cash, positions, and open
+orders. Only this refreshed state may be used for buy sizing.
 
-After sells, re-fetch account, positions, and open orders. Use the refreshed
-state—not estimates—for all entry checks.
+## Step 4 — Revalidate every potential buy
 
-## Step 4 — Revalidate buy candidates
+Drop a held candidate from same-cycle top-up consideration when its stop-loss,
+take-profit, conviction trim, or exit fired earlier in the cycle, including in
+dry-run mode.
 
-Reject a held candidate for a same-cycle top-up if any stop-loss, take-profit,
-conviction-trim, or exit sell was scheduled for that symbol, even in dry run.
+On Monday, check weekend Alpaca news and primary-source updates against every
+proposal's invalidation criteria. Reject materially invalidated proposals.
 
-On Monday, inspect weekend Alpaca news and primary-source updates for every
-remaining proposal. Reject a candidate when a material development triggers
-its documented invalidation criteria.
+For each remaining new entry or top-up:
 
-For every remaining new entry and top-up:
+1. Pull a fresh Robinhood quote. The Robinhood ask is the executable price for
+   entry gating, quantity estimates, and logs.
+2. Pull the Alpaca SIP snapshot for the same symbol. Treat it as an independent
+   market-data sanity check, not as the executable quote.
+3. If enabled, reject the buy when the Alpaca quote is older than
+   `data_crosscheck.max_alpaca_quote_age_seconds`, missing, or differs from the
+   Robinhood ask by more than `data_crosscheck.max_quote_divergence_pct`.
+   Log both prices and timestamps. This check never blocks sells.
+4. Pull the configured adjusted daily closes from Alpaca.
+5. Use Robinhood P&L trade history across configured linked accounts to gather
+   recent loss-sale dates.
+6. Reconstruct the latest actually executed Robinhood sell lock from the audit
+   log and current position history.
+7. Run `scripts/entry_gate.py` using the Robinhood ask as `fresh_ask`, Phase
+   A's Alpaca `current_price` as `thesis_price`, Alpaca daily closes, and the
+   Robinhood wash-sale/re-entry history.
 
-1. fetch a fresh SIP snapshot;
-2. use the ask as `fresh_ask`;
-3. obtain the last configured number of adjusted daily closes;
-4. inspect this account's Alpaca fill activities for loss sales inside the
-   configured wash-sale window;
-5. reconstruct any real prior sell lock from filled orders and the audit log;
-6. run `scripts/entry_gate.py` with those inputs.
+Reject on any script blocking condition: excessive overnight gap, excessive
+20-day extension, wash-sale guard, or sell re-entry lock. A candidate is also
+rejected when required inputs cannot be reconciled. Never average conflicting
+provider prices to manufacture a pass.
 
-Reject on any gate failure:
+If the price changed materially but remains under the hard ceiling, inspect
+fresh Alpaca news and primary sources against the thesis invalidation criteria.
 
-- ask more than `entry_price_gap.max_pct` above Phase A's `current_price`;
-- price more than `entry_extension.max_extension_pct` above its moving average;
-- same-account wash-sale guard;
-- active sell re-entry lock.
+## Step 5 — Robinhood account loss limit
 
-If a material gap is inside the mechanical ceiling, determine whether fresh
-news nevertheless invalidates the thesis. Cite the evidence; do not simply
-repeat Phase A's view.
-
-## Step 5 — Account loss limit
-
-Call Alpaca portfolio history for the day and week:
-
-```bash
-python3 scripts/alpaca_api.py portfolio-history --period 1D --timeframe 5Min
-python3 scripts/alpaca_api.py portfolio-history --period 1W --timeframe 1D
-```
-
-Take the last non-null `profit_loss` value from each response and run:
+Call Robinhood `get_realized_pnl` for day and week, equity only. Pass the dollar
+`total_returns` values to:
 
 ```bash
 python3 scripts/pnl_pct.py \
@@ -198,27 +190,25 @@ python3 scripts/pnl_pct.py \
   --daily-limit-pct DAILY_LIMIT --weekly-limit-pct WEEKLY_LIMIT
 ```
 
-This Alpaca version uses account-level P&L, including unrealized movement, so
-an unsold drawdown cannot be hidden from the entry halt. If either portfolio
-history or the script fails, halt all new entries and top-ups.
+If either P&L value or the script is unavailable, halt all new entries and
+top-ups. The halt never blocks exits.
 
 ## Step 6 — Rank and size entries
 
-Merge surviving new and held candidates. Preserve from Phase A:
+Merge surviving new and held candidates. Preserve:
 
-- `conviction`;
-- `risk_flags`;
+- `conviction` and `risk_flags` from the detailed thesis;
 - `technical_setup.signal_score` as top-level `signal_score`;
 - `group` (`new` or `held`);
-- current position value for held candidates.
+- current Robinhood position value for held candidates.
 
-Pipe the JSON list through:
+Pipe the JSON candidate array through:
 
 ```bash
 python3 scripts/rank_candidates.py | \
 python3 scripts/position_sizing.py \
-  --total-value TOTAL_EQUITY --cash-start CASH \
-  --concurrent-positions-start OPEN_COUNT \
+  --total-value TOTAL_VALUE --cash-start CASH \
+  --concurrent-positions-start OPEN_POSITION_COUNT \
   [--entries-halted] \
   --max-position-pct MAX_POSITION_PCT \
   --max-concurrent-positions MAX_POSITIONS \
@@ -228,66 +218,53 @@ python3 scripts/position_sizing.py \
   --conviction-pct 'high:HIGH,medium:MEDIUM,low:LOW'
 ```
 
-Ranking is deterministic: conviction first, then fewer risk flags, then higher
-Phase A technical `signal_score`. Sizing is sequential, so earlier candidates
-consume cash and new-position slots before later candidates. Top-ups do not
-consume a new slot.
+All monetary/account inputs in this call come from Robinhood, never Alpaca.
+Ranking is conviction first, then fewer risk flags, then the higher
+deterministic Alpaca technical `signal_score`. Sizing is sequential; higher
+ranked approvals consume cash and new-position slots first. Top-ups consume no
+new slot.
 
-Log the script output verbatim in a `risk_check` entry. Include
-`proposal_date`, `risk_flags`, `signal_score`, group, and whether it is a
-top-up. If either script fails, reject every pending buy; do not hand-rank or
-hand-size.
+Log the script output verbatim with `proposal_date`, group, conviction,
+risk flags, and signal score. If ranking or sizing fails, reject all remaining
+buys rather than manually reproducing the calculation.
 
-## Step 7 — Execute approved paper buys
+## Step 7 — Review and execute buys through Robinhood MCP
 
-Apply the same preflight and paper-order gate used for sells. Use notional
-orders only for fractionable assets; otherwise derive a whole-share quantity
-that does not exceed the approved dollar amount or cash buffer.
+For every approved candidate in ranked order, repeat Step 3's Robinhood
+review → live-order gate → placement → two-check confirmation procedure. Use
+the fresh Robinhood ask and the script-approved dollar amount. Never send an
+order to Alpaca.
 
-```bash
-python3 scripts/alpaca_api.py order --symbol XXXX --side buy \
-  --notional DOLLARS --type market --time-in-force day \
-  --client-order-id ID --confirm-paper
-```
-
-Poll status at most twice and log estimate versus actual fill separately. Do
-not retry a rejected order with looser parameters. The deterministic client
-order id is the protection against duplicate submissions after a timeout.
+Do not retry a rejected order with looser parameters. Re-pull cash/positions
+when an earlier order's fill materially affects the next order; otherwise stop
+the remaining sequence if state cannot be reconciled safely.
 
 ## Step 8 — Audit log and publication
 
-Append one JSON object per decision to `trade_log.jsonl`. Valid stages include:
+Append one JSON line per `stop_loss`, `take_profit`, `conviction_trim`,
+`loss_limit_check`, `risk_check`, and `order` decision. Every line gets a real
+US/Eastern date/time. Candidate decisions include `proposal_date`; market-data
+checks include both provider names and timestamps.
 
-- `stop_loss`
-- `take_profit`
-- `conviction_trim`
-- `loss_limit_check`
-- `risk_check`
-- `order`
-- `cycle_summary`
-
-Every line includes real `date` and `timestamp`; candidate decisions include
-`proposal_date`. Every run appends exactly one final summary:
+Append exactly one final line:
 
 ```json
-{"date":"YYYY-MM-DD","timestamp":"HH:mm:ss","stage":"cycle_summary","mode":"dry_run|paper","candidates_considered":0,"orders_approved":0,"orders_submitted":0,"orders_filled":0,"errors":[]}
+{"date":"YYYY-MM-DD","timestamp":"HH:mm:ss","stage":"cycle_summary","mode":"dry_run|live","candidates_considered":0,"orders_reviewed":0,"orders_placed":0,"orders_filled":0,"errors":[]}
 ```
 
-Regenerate `trade_log_recent.md` as a concise human-readable view. It must
-report technical/news revalidation, every held-position risk check, entry
-rejections, and submitted/fill status, but it must not introduce new decisions.
-`trade_log.jsonl` remains the source of truth.
+Regenerate `trade_log_recent.md` as a readable recap without making new
+decisions. `trade_log.jsonl` remains authoritative.
 
-Commit only the audit files. Never stage `.env`, credentials, configuration
-changes made during a run, or unrelated files. On push rejection, pull with
-rebase once and retry once; never force push or guess through a log conflict.
+Commit only `trade_log.jsonl` and `trade_log_recent.md`. Never commit secrets,
+temporary API responses, or unrelated changes. On push rejection, pull with
+rebase once and retry once; never force-push or guess through an audit-log
+conflict.
 
 ## Non-negotiable rules
 
-- Never change `execution.mode` or another risk threshold.
-- Never use a live Alpaca endpoint.
-- Never submit an order unless every paper-order gate condition passes.
-- Never let model conviction override a script result.
-- Never fabricate missing fundamental, market, news, order, or fill data.
-- Never treat a submitted/accepted paper order as filled without order-status
-  confirmation.
+- Alpaca is data-only; no Alpaca account or trading endpoint.
+- Robinhood MCP is the only execution route.
+- Never change execution mode or risk thresholds during a run.
+- Never place a Robinhood order unless every live-order gate condition passes.
+- Never let LLM conviction override a script failure or rejection.
+- Never fabricate missing fundamental, market, news, portfolio, or fill data.

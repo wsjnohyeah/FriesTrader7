@@ -6,7 +6,7 @@ already priority-sorted candidate list, per risk_rules.json/
 PHASE_B_TASK.md.
 
 Candidates are processed in the order given (the caller must have
-already applied the conviction/risk_flags/pct_below_52wk_high sort) so
+already applied the conviction/risk_flags/signal_score sort) so
 that cash_remaining and concurrent_positions_after compound correctly
 across the list, the same way a human working top-to-bottom down a
 priority list would.

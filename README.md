@@ -1,411 +1,231 @@
-# FriesTrader
+# FriesTrader7 — Codex + Alpaca paper-trading workflow
 
-![License](https://img.shields.io/github/license/YizhiSong/FriesTrader)
-![GitHub stars](https://img.shields.io/github/stars/YizhiSong/FriesTrader)
+FriesTrader7 is a two-phase, auditable AI trading workflow. Codex performs
+after-close market discovery and evidence-based analysis; deterministic Python
+scripts enforce entry, exit, ranking, and sizing rules; Alpaca supplies SIP
+market data, news, account state, and paper order execution.
 
-An AI trading agent built to run cheap and fully on its own, trading real
-orders on [Robinhood](https://robinhood.com) using its
-[Agentic Trading MCP server](https://robinhood.com/us/en/agentic-trading/).
-Once set up, it's able to run unattended on its own schedule every
-weekday, no manual triggering needed, and the actual safety mechanism is
-mechanical, auditable risk rules, not the model's judgment. Two short
-scheduled Claude Code sessions a day screen stocks, write out their
-reasoning, and (only under a narrow, explicit gate) place real trades,
-without a team of specialized sub-agents burning tokens on every
-decision. Because it's just two lean sessions instead of a multi-agent
-pipeline, it runs comfortably on a Claude Pro subscription (as low as
-$200/year on the annual plan), no Claude Max or metered API spend
-required.
+This repository is intentionally paper-only. It is a research and automation
+template, not evidence that LLM-selected stocks outperform an index.
 
-This is a template/framework extracted from a real, live deployment.
-Adapt it, don't just run it blind — read "What this does and doesn't
-solve" below before pointing it at real money.
+## Architecture
 
-> If you build on this, a star, a fork, or a link back to this repo is
-> always appreciated.
-
-## Why this is safer than it sounds
-
-"Fully autonomous" and "trading real money" together should make you
-nervous. Here's what actually stands between a thesis and an order:
-
-- **Every trade passes through mechanical rules the LLM cannot
-  override** — position sizing, stop-loss, take-profit, loss limits, a
-  wash-sale guard, each computed by a small stdlib-only Python script in
-  `scripts/` rather than the model doing arithmetic in prose. Same
-  inputs always produce the same numbers, and a good story never cancels
-  a stop-loss.
-- **New deployments start in `dry_run` and stay there** for a minimum
-  number of cycles (`dry_run_min_cycles_before_live`) before a live
-  order is even possible, so you can watch it screen and reason before
-  it touches real money.
-- **Only you can flip `execution.mode` to `"live"`** — the agent is
-  explicitly barred from ever changing this itself, and refuses to
-  place live orders while `dry_run`.
-- **Every decision is logged, approved or rejected** — `trade_log.jsonl`
-  is append-only, so you can check whether the reasoning is actually
-  sound, not just trust it.
-
-## Requirements
-
-- A [Robinhood](https://robinhood.com) account with
-  [Agentic Trading](https://robinhood.com/us/en/agentic-trading/) enabled,
-  connected via Robinhood's own MCP server.
-- [Claude Code](https://claude.com/claude-code), on a Pro subscription or
-  higher.
-- A GitHub account, to host your own copy of this repo — only needed
-  for the cloud-hosted deployment (see "How it works" below for the
-  cloud vs. local tradeoff).
-
-## How it works
-
-Trading runs as **two separate phases, on two separate schedules** — a
-full trading day's closing data feeds the thesis, and a fresh opening
-price is used for the actual order, rather than trading on a stale
-overnight price.
-
-```mermaid
-graph TD
-    RH[Robinhood MCP] -- watchlist + scan / quotes / historicals --> A[Phase A: Screen & Thesis]
-    A -- thesis per candidate --> P[pending_proposals.jsonl]
-    P --> B[Phase B: Re-verify & Risk Enforcement]
-    RR[risk_rules.json] -- thresholds --> S[scripts/*.py deterministic risk math]
-    S -- JSON results, read verbatim --> B
-    RH -- fresh open price / positions --> B
-    B -- dry_run or gated live order --> RH
-    B -- every decision logged --> L[trade_log.jsonl]
-    L -- plain-English recap --> REC[trade_log_recent.md]
+```text
+Alpaca movers + most actives + watchlist + open positions
+                         │
+                         ▼
+ Phase A (after close, Codex gpt-6-astra)
+ dynamic scan → technical metrics → news/filing research → detailed thesis
+                         │
+                         ▼
+              pending_proposals.jsonl
+                         │
+                         ▼
+ Phase B (after next open, Codex gpt-6-astra)
+ fresh prices → exits → entry gates → ranking/sizing → paper orders
+                         │
+                         ▼
+          trade_log.jsonl + trade_log_recent.md
 ```
 
-Only one step is a judgment call — the Phase A thesis. Every filter,
-ranking, and size is a deterministic script.
+The selected model is configured in the Codex automation, not inside a prompt.
+The task specifications require `gpt-6-astra` and instruct the run to report a
+configuration error if that model is unavailable rather than silently using a
+different provider.
 
-**Phase A — screen and write a thesis** (Steps 1–3, ~4:30pm Central
-weekdays; spec `PHASE_A_TASK.md`). Places no orders.
+This is the Codex-native integration path: the scheduled Codex task itself is
+the GPT-6 Astra agent. It does not require an OpenAI API key in the repository.
+If you later replace Codex scheduling with a standalone service that calls the
+OpenAI Responses API, that service will need a separate `OPENAI_API_KEY` and
+API billing; a ChatGPT subscription and API usage are separate products.
 
-1. **Universe.** Start with your watchlist (up to
-   `universe.watchlist_max_candidates`), plus up to
-   `universe.supplementary_scan_max_candidates` movers from your saved
-   Robinhood scan, plus every position you currently hold. Remove anything
-   failing the `universe` filters in `risk_rules.json` — volume,
-   market-cap band, minimum price, leveraged/inverse ETFs, price below its
-   200-day moving average. Held positions are always kept.
-2. **Signal gate.** A candidate is researched only if it meets **any one**
-   of `signal_thresholds`: a 60-day price move, a volume spike, or a price
-   near its 52-week high or low. The rest are logged `no_signal` with no
-   thesis. Held positions are always researched.
-3. **Thesis.** The model runs a news search and writes a line to
-   `pending_proposals.jsonl`: `direction` (`long` / `avoid` /
-   `exit_existing`), `conviction` (`high` / `medium` / `low`, against a
-   fixed rubric so the same facts give the same rating), `risk_flags`, and
-   percent below the 52-week high. This is the stock selection.
+## What is deterministic
 
-**Phase B — re-verify, enforce the rules, place orders** (Steps 4–9,
-~8:35am Central weekdays; spec `PHASE_B_TASK.md`). Decides which `long`
-candidates are bought:
+The model researches and synthesizes evidence. It does not decide risk math:
 
-- **Re-verify.** Re-check each proposal against the opening price. Run all
-  sells (stop-loss, take-profit, `exit_existing`) before any buy.
-- **Buy gate** (`entry_gate.py`). The buy is skipped this cycle if the
-  price is more than `entry_price_gap.max_pct` above the thesis price,
-  more than `entry_extension.max_extension_pct` above its 20-day average,
-  or under a wash-sale or sell-re-entry lock.
-- **Rank** (`rank_candidates.py`). By conviction, then fewer `risk_flags`,
-  then larger percent below the 52-week high.
-- **Size** (`position_sizing.py`). In ranked order, each candidate is
-  bought at its conviction-tier size (a fixed percent of the account)
-  until `max_concurrent_positions` or the `min_cash_buffer_pct` floor is
-  reached.
+- `market_scan.py` discovers broad-market candidates and computes technicals.
+- `entry_gate.py` enforces gap, extension, wash-sale, and re-entry locks.
+- `stop_loss.py` computes fixed or volatility-scaled stops.
+- `take_profit.py` computes cascading partial exits.
+- `conviction_trim.py` mechanically reduces persistent low-conviction exposure.
+- `pnl_pct.py` enforces daily and weekly account-loss limits.
+- `rank_candidates.py` ranks by conviction, risk flags, and technical score.
+- `position_sizing.py` applies position, slot, cash-buffer, and top-up limits.
+- `validate_proposals.py` prevents incomplete detailed theses from being
+  published to Phase B.
 
-Every decision is logged to `trade_log.jsonl`. Some cycles buy nothing.
+All scripts use the Python standard library.
 
-**Example.** `EXAMPLE` is on your watchlist at $40, a $15B-cap trading
-above its 200-day average, so it passes the universe filters. It is up 16%
-over 60 days, so it meets the price-move threshold and gets a news search;
-the model finds a confirmed earnings beat, no risk flags, and rates it
-`high` conviction, `long`. Next morning it opens at $40.60, within all
-buy-gate limits, and is the only `high`-conviction candidate, so it ranks
-first. `high` is 20% of the account: on $500 that is a $100 buy, placed if
-the cash buffer holds. Had it opened at $42 — 5% above the thesis price,
-over the `entry_price_gap.max_pct` limit — the buy would be skipped that
-cycle.
+## Broader stock discovery
 
-Both are designed to run as cloud-hosted scheduled agent sessions,
-independent of any local machine — each run clones this repo fresh and
-commits/pushes its results back to `main`, so the repo itself is the
-persistent state, not local disk. (Running locally instead works too,
-but only fires while your machine is on and available at each
-scheduled time.)
+Phase A is not limited to a hand-maintained watchlist. Every run merges:
 
-- `risk_rules.json` — the hard, mechanical limits (position sizing, stop-
-  loss, loss limits, universe filters, execution mode, wash-sale guard).
-  Nothing in this system should be able to override these. Several
-  fields need your own account details before this is usable — see
-  First-time setup below.
-- `scripts/` — the deterministic risk-math engines Phase B runs instead
-  of hand-computing anything, each a standalone Python 3 script (stdlib
-  only, no dependencies) you can run and inspect on its own:
-  - `entry_gate.py` — the buy gate above, every blocking condition in one
-    call.
-  - `pnl_pct.py` — daily/weekly loss-limit % against `starting_capital_usd`,
-    and the entries-halted decision.
-  - `stop_loss.py` — the fixed or volatility-scaled stop_pct (clamped,
-    sample-stdev of daily returns), including the trailing-high reference
-    price once a take-profit tier has fired, and the trigger decision.
-  - `take_profit.py` — tiered partial-exit firing, cascading quantity
-    correctly when a single cycle's gain jumps past more than one
-    not-yet-fired tier at once.
-  - `conviction_trim.py` — mechanically trims a held position back to
-    its conviction-tier target after several consecutive
-    low-conviction, overweight cycles.
-  - `rank_candidates.py` — the ranking above (conviction, `risk_flags`,
-    `pct_below_52wk_high`); new entries and top-ups compete on one list.
-  - `position_sizing.py` — the sizing above, plus concurrency and
-    cash-buffer checks, compounding running totals down the ranked list.
+- Alpaca whole-market gainers and losers;
+- Alpaca whole-market most-active stocks;
+- symbols in the latest market-wide Alpaca news feed;
+- an optional Alpaca watchlist;
+- optional seed symbols in `risk_rules.json`;
+- every current position.
 
-  Each takes plain CLI args, prints one JSON object, and is meant to be
-  read from directly rather than re-derived — see `PHASE_B_TASK.md`
-  Steps 5 and 7 for the exact call shape of each
-  (`stop_loss.py`/`take_profit.py`/`conviction_trim.py` in Step 5;
-  `entry_gate.py`/`pnl_pct.py`/`rank_candidates.py`/`position_sizing.py`
-  in Step 7).
-- `PHASE_A_TASK.md` / `PHASE_B_TASK.md` — the full, self-contained spec
-  each phase follows.
-- `trade_log_template.jsonl` — the log line shapes; real logs accumulate
-  in `trade_log.jsonl` in this same style.
+It then uses SIP snapshots and adjusted history to calculate:
 
-## See it in action
+- daily movement and opening gap;
+- intraday high/low range;
+- relative volume and average dollar volume;
+- 20-day momentum and breakout;
+- SMA20/SMA50/SMA200;
+- RSI14 and ATR14 percentage.
 
-This is what a real Phase B cycle actually produces (`trade_log_recent.md`,
-regenerated every run, symbols genericized):
+Dynamic candidates are ranked by a disclosed technical signal score. Open
+positions are always retained. Thresholds and source caps are configurable in
+`risk_rules.json`.
 
-> **2026-07-09**
->
-> **Loss limit**: OK — daily 0.0%, weekly -2.1%, within -5%/-10% limits.
->
-> **Held positions** (stop-loss / take-profit):
-> - EXAMPLE — stop 7.00% (vol-scaled), drawdown -2.3% — holding
->
-> **New-entry candidates considered**: OTHER, ANOTHER
-> - OTHER — approved: medium conviction, $60.00 (12% of account)
-> - ANOTHER — rejected: max_concurrent_positions already filled this cycle
->
-> **Orders placed**: OTHER — buy $60.00 (dry_run)
+Alpaca Pro market data is not a complete company-fundamentals service. The
+workflow must not invent market cap, P/E, earnings estimates, balance-sheet
+figures, or similar data. Verified filing facts may be used when cited;
+otherwise the missing item is recorded under `data_gaps`.
 
-No JSON parsing required to see what it did and why. Full field-level
-examples (thesis records, raw `trade_log.jsonl` lines) are further down
-in Example output.
+## More detailed LLM analysis
 
-## What this does and doesn't solve
+Each researched symbol now requires:
 
-- It gives you a structured, auditable version of "let an LLM screen and
-  reason about trades" instead of an opaque one.
-- It does **not** make LLM-driven stock picking more likely to beat a
-  simple index fund — there's no established track record for that, and
-  this can't backtest the reasoning step honestly (news-based reasoning
-  can't be validated against historical data the model may already know
-  the outcome of).
-- The risk rules are the actual safety mechanism here, not the reasoning
-  quality. Treat loosening them as the highest-risk change you can make
-  to this system.
-- This is a template extracted from a real deployment trading a small
-  personal account, shared for others to learn from or adapt. It is
-  genuinely not financial advice, and running it against real money is
-  entirely your own decision and risk.
+- a decision-oriented executive summary;
+- catalyst chronology and confirmation status;
+- source-by-source news evidence with timestamps and URLs;
+- trend, momentum, volume, volatility, and observed technical levels;
+- explicit bull and bear cases;
+- concrete invalidation conditions;
+- fixed risk flags;
+- material data gaps;
+- an explanation for the exact conviction tier.
 
-## First-time setup
+At least two independent sources are required by default. High conviction also
+requires a confirmed company-specific catalyst, a primary or wire source,
+corroboration, a supportive technical setup, and no unresolved material risk
+flag or data gap.
 
-**Get your own copy first:**
+## Alpaca authentication
 
-- **Cloud-hosted scheduled sessions (recommended)**: these commit and
-  push results back to `main`, so you need a repo you actually control.
-  - **Running this against your own account**: click **"Use this
-    template"** (top of this repo's GitHub page) and make the result
-    **private** — it'll accumulate real trading data
-    (`trade_log.jsonl`, proposals) once running.
-  - **Building a public variant**, not running your own account:
-    **Fork** it — keeps a link back here and an easy "Sync fork" button
-    for updates.
-- **Running locally**: skip this — just clone or download the
-  repo; state lives on local disk, but your machine needs to be on and
-  available at each scheduled run time.
+Never put credentials in this repository or in a scheduled prompt. Create or
+rotate an Alpaca paper API key and expose both values to the Codex runtime:
 
-See "Keeping your copy updated" below for pulling in future
-improvements.
-
-1. Robinhood's [Agentic Trading](https://robinhood.com/us/en/agentic-trading/)
-   requires a separate, dedicated account — distinct from your regular
-   investing account, and restricted to only the funds you put in it. See
-   that page to open one and connect its MCP server to Claude Code (or to
-   your routine's MCP connections). Nothing below works without this:
-   every tool call in `PHASE_A_TASK.md`/`PHASE_B_TASK.md` (quotes,
-   positions, orders, etc.) goes through it.
-2. Fill in `account_number` in `risk_rules.json` with your own Robinhood
-   account number, set `starting_capital_usd` to your real starting
-   balance, set `universe.watchlist_name` to a watchlist you've already
-   created and populated in your Robinhood account, and review every
-   other threshold — the defaults here are illustrative, not a
-   recommendation.
-3. Create a scan via the Robinhood MCP's `create_scan` tool — whatever
-   screening conditions you like — then paste its ID into
-   `universe.supplementary_scan_id`. Phase A calls this scan every run
-   to surface movers outside your watchlist — left as the placeholder,
-   that call fails every cycle.
-4. Fill in `wash_sale_avoidance.linked_accounts` with every Robinhood
-   account number you personally control, not just this one — if this is
-   genuinely the only account you trade in, a single-entry list (just
-   this account's number) is enough. Leave `enabled: true` unless you
-   specifically want buys never blocked on wash-sale grounds.
-5. Keep `execution.mode` set to `"dry_run"`. Leave it there for at least
-   the number of cycles set in `dry_run_min_cycles_before_live` — don't
-   shortcut this.
-6. After each cycle, read `trade_log.jsonl` yourself. Look specifically
-   at rejected candidates and stop-loss triggers, not just the trades
-   that "worked" — that's where you'll see if the reasoning step is
-   actually sound or just getting lucky with an uptrend.
-7. Only flip `execution.mode` to `"live"` yourself, by hand, after you've
-   reviewed enough dry-run cycles to trust the output. Do not let the
-   agent flip it for you as a shortcut.
-
-## Keeping your copy updated
-
-This template gets improvements over time.
-
-- **If you forked**: GitHub's "Sync fork" button, on your repo's main
-  page. No local git needed. Works cleanly as long as nothing conflicts
-  with your own changes.
-- **If you used the template (or "Sync fork" refuses on a conflict,
-  usually in `risk_rules.json`)**, resolve locally:
-  ```
-  git remote add upstream https://github.com/YizhiSong/FriesTrader.git
-  git fetch upstream
-  git merge upstream/main
-  ```
-  Resolve any conflicts in `risk_rules.json` by hand — your own account
-  details and thresholds should win, not upstream's placeholders.
-
-## Running it
-
-Two schedules need to fire: Phase A around 4:30pm Central on weekdays
-(hand Claude Code `PHASE_A_TASK.md` to execute), and Phase B around
-8:35am Central on weekdays, 5 minutes after market open (hand it
-`PHASE_B_TASK.md`). Each run is a fresh Claude Code session pointed at
-this repo — no state needs to persist locally between runs, since the
-repo itself (`risk_rules.json`, `pending_proposals.jsonl`,
-`trade_log.jsonl`) is what's read and written each time.
-
-- **Recommended: Claude Code's own scheduled cloud routines.** Set one
-  routine to run `PHASE_A_TASK.md` on the Phase A schedule and a second
-  for `PHASE_B_TASK.md` on the Phase B schedule, with the routine's
-  source pointed at **your copy** from First-time setup, not this repo.
-  This runs independent of any machine being on — the actual point of
-  "fully automated."
-- **Alternative: a local scheduler** (cron, Windows Task Scheduler, etc.)
-  invoking the Claude Code CLI against your copy on the same two
-  schedules. Works, but only while that machine is running, and you're
-  responsible for keeping the repo synced (`git pull` before, `git push`
-  after each run) since the repo — not local disk — is the source of
-  truth. If you go this route, make sure only one scheduler is ever
-  active for a given phase — two schedulers firing the same phase in the
-  same cycle risks duplicate `risk_check`/`order` log entries, or
-  duplicate real orders once `execution.mode` is `"live"`.
-
-### Routine prompt templates
-
-The task specs don't cover scheduling, dates, or saving results — that's
-up to whatever runs them. These are the real prompts this project's live
-deployment uses; copy one in and swap in your own account number.
-
-#### Phase A prompt
-
-```
-You are running the DAILY automated Phase A step (screening & thesis only) for a small real personal trading account on Robinhood (account_number: <your Robinhood account_number>). This repo has already been cloned into your working directory. PHASE_A_TASK.md in this checkout is the full source-of-truth spec for what to do (Steps 1-3) — read and follow it exactly.
-
-First, determine today's REAL date, day-of-week, and time-of-day in America/Chicago (Central) via Bash — do not guess or infer these:
-TZ='America/Chicago' date +'%Y-%m-%d'
-TZ='America/Chicago' date +'%A'
-TZ='America/Chicago' date +'%H:%M:%S'
-Use the date as the 'date' field and the time as the 'timestamp' field (time-of-day only, e.g. "16:30:01" — never prepend the date to it) on every line you write, per PHASE_A_TASK.md's Output section.
-
-Read risk_rules.json fresh from this checkout every run — never assume prior values or cache across runs.
-
-Follow PHASE_A_TASK.md's Steps 1-3 exactly, including the screened/thesis/summary line shapes and the End-of-run summary section. Overwrite pending_proposals.jsonl in this checkout with this run's results (do not append to prior contents). Do NOT touch trade_log.jsonl.
-
-Hard stop: place_equity_order, review_equity_order, place_option_order, review_option_order, cancel_equity_order, and cancel_option_order should not be available to you in this session (exclude them at the connector level if your MCP setup allows it) — do not attempt them regardless, and do not check or reference execution.mode.
-
-When pending_proposals.jsonl is fully written, commit and push it back to this repo's main branch:
-git add pending_proposals.jsonl
-git commit -m "Phase A run <date> <timestamp>"
-git push origin main
-If the push is rejected (e.g. a race with another run), run 'git pull --rebase origin main' once and retry the push once. If it still fails, report the exact conflict/error in your final summary rather than force-pushing or discarding either side's changes.
-
-End with a concise summary of what you screened/filtered/proposed, and confirm the push succeeded (include the resulting commit hash).
+```bash
+export ALPACA_API_KEY_ID='your_new_key_id'
+export ALPACA_API_SECRET_KEY='your_new_secret'
+export ALPACA_TRADING_BASE_URL='https://paper-api.alpaca.markets/v2'
+export ALPACA_DATA_BASE_URL='https://data.alpaca.markets'
+export ALPACA_DATA_FEED='sip'
 ```
 
-#### Phase B prompt
+`.env` files are ignored, but the provided Python tools deliberately do not
+auto-load them. Your scheduler or secret manager should inject the environment.
+Avoid shell tracing (`set -x`) when secrets are present.
 
-```
-You are running the DAILY automated Phase B step (re-verify, risk enforcement, order review/execution, logging) for a small real personal trading account on Robinhood (account_number: <your Robinhood account_number>). This repo has already been cloned into your working directory. PHASE_B_TASK.md in this checkout is the full source-of-truth spec for what to do (Steps 4-9) — read and follow it exactly.
+Verify read-only access:
 
-First, determine today's REAL date, day-of-week, and time-of-day in America/Chicago (Central) via Bash — do not guess or infer these, and do not compute day-of-week yourself from the date string:
-TZ='America/Chicago' date +'%Y-%m-%d'
-TZ='America/Chicago' date +'%A'
-TZ='America/Chicago' date +'%H:%M:%S'
-Use the date as the 'date' field and the time as the 'timestamp' field (time-of-day only, e.g. "08:35:01" — never prepend the date to it) on every line you write to trade_log.jsonl, per PHASE_B_TASK.md. Determine is_monday from the day-of-week output (true only if it's literally 'Monday') for the Step 7 weekend-gap check.
-
-Read risk_rules.json fresh from this checkout every run — never assume prior values or cache across runs. Read pending_proposals.jsonl and trade_log.jsonl fresh from this checkout too.
-
-Follow PHASE_B_TASK.md's Steps 4-9 exactly, including the idempotency rule (key off each candidate's own proposal_date, not today's date), the dry-run cycle count rule, the priority/tiebreak rules, and the live-order gate (Step 6 for sells, Step 8 for buys). This task is authorized to place real live orders only under that gate's narrow, explicit condition. Do not add, remove, or loosen any condition of that gate on your own judgment, and never change execution.mode or any other value in risk_rules.json yourself.
-
-Append every decision to trade_log.jsonl (do not touch pending_proposals.jsonl except to read it). When done, commit and push trade_log.jsonl back to this repo's main branch:
-git add trade_log.jsonl
-git commit -m "Phase B run <date> <timestamp>"
-git push origin main
-If the push is rejected (e.g. a race with another run), run 'git pull --rebase origin main' once and retry the push once. If it still fails, report the exact conflict/error in your final summary rather than force-pushing or discarding either side's changes — this file is an append-only audit trail, treat any conflict here as serious and report it clearly rather than guessing how to resolve it.
-
-End with a concise summary of what you checked, approved, rejected, and (if applicable) placed, and confirm the push succeeded (include the resulting commit hash).
+```bash
+python3 scripts/alpaca_api.py account
+python3 scripts/alpaca_api.py clock
+python3 scripts/alpaca_api.py movers --top 10
+python3 scripts/market_scan.py > market_scan_latest.json
 ```
 
-### Example output
+The client never prints credentials. Its order command requires
+`--confirm-paper` and independently refuses any non-paper hostname.
 
-**Phase A — thesis record** (one JSON line per candidate in
-`pending_proposals.jsonl`):
+## Initial configuration
 
-```json
-{
-  "date": "YYYY-MM-DD",
-  "timestamp": "HH:mm:ss",
-  "symbol": "XXXX",
-  "stage": "thesis",
-  "thesis": "1-3 sentences on what changed and why it might matter",
-  "conviction": "low | medium | high",
-  "invalidation": "what would prove this thesis wrong",
-  "direction": "long | avoid | exit_existing",
-  "risk_flags": ["..."],
-  "pct_below_52wk_high": 0.15,
-  "sources": ["Outlet Name: https://...", "..."]
-}
+Edit `risk_rules.json` manually before scheduling:
+
+1. Set `starting_capital_usd` to net deposits minus withdrawals.
+2. Optionally set `universe.alpaca_watchlist_name` and `seed_symbols`.
+3. Review dynamic-discovery, liquidity, and technical thresholds.
+4. Review all position sizing, stop, take-profit, and account loss limits.
+5. Keep `execution.mode` at `dry_run` for at least the configured number of
+   distinct cycles.
+6. Only after reviewing every log should a human change the mode to `paper`.
+
+`paper` means simulated Alpaca orders. This repository prohibits the live
+Alpaca endpoint.
+
+## Scheduling with Codex
+
+Create two separate Codex automations pointed at your private repository and
+select `gpt-6-astra` for both:
+
+- Phase A: weekdays after the US close, for example 4:30 PM America/New_York.
+- Phase B: weekdays about five minutes after the open, for example 9:35 AM
+  America/New_York.
+
+Phase A prompt:
+
+```text
+Read AGENTS.md and execute PHASE_A_TASK.md exactly. Use the current checkout as
+the source of truth. Do not place, replace, or cancel orders. Commit and push
+only the output files named by the task specification.
 ```
 
-`risk_flags` and `pct_below_52wk_high` are only included when
-`direction` is `"long"` — omitted for `avoid`/`exit_existing`.
+Phase B prompt:
 
-- **No price targets** — no reliable basis for a specific number, and it
-  invites false precision.
-- **No forecasting language treated as fact** — "this suggests...", not
-  "this will...".
-
-**Phase B — `trade_log.jsonl`** (the durable, append-only source of
-truth — one line per decision; `trade_log_recent.md`, shown under "See
-it in action" above, is just its daily recap):
-
-```json
-{"date": "2026-07-10", "timestamp": "08:38:10", "symbol": "EXAMPLE", "stage": "risk_check", "passed": true, "conviction": "medium", "risk_flags": [], "pct_below_52wk_high": 0.08, "proposal_date": "2026-07-09", "position_size_usd": 60.00, "concurrent_positions_after": 2, "cash_remaining_after": 340.00, "cash_buffer_after_pct": 0.34}
-{"date": "2026-07-09", "timestamp": "08:35:12", "symbol": "EXAMPLE", "stage": "order", "mode": "dry_run", "action": "buy", "dollar_amount": 60.00, "quote_ask": 84.20, "quantity": 0.712, "would_execute": true, "review_alerts": "none (order_checks empty)", "proposal_date": "2026-07-09"}
-{"date": "2026-07-10", "timestamp": "08:38:30", "symbol": "OTHER", "stage": "stop_loss", "entry_price": 100.00, "current_price": 92.50, "stop_pct_used": 0.075, "stdev_20d": 0.030, "drawdown_pct": 0.075, "triggered": true, "action": "sell_full_position"}
+```text
+Read AGENTS.md and execute PHASE_B_TASK.md exactly. Use the current checkout as
+the source of truth. Paper orders are authorized only when every gate in the
+task specification passes. Never use a live Alpaca endpoint. Commit and push
+only the output files named by the task specification.
 ```
+
+Use only one scheduler for each phase. Concurrent duplicate Phase B runs can
+produce duplicate decisions; deterministic client order IDs reduce but do not
+eliminate the need for single-run scheduling.
+
+## Main configuration defaults
+
+The checked-in defaults are illustrative:
+
+| Rule | Default |
+|---|---:|
+| Dynamic mover candidates | 50 gainers/losers feed |
+| Most-active candidates | 50 |
+| Dynamic names researched | 20 |
+| Minimum price | $5 |
+| Minimum 20-day dollar volume | $20M/day |
+| Daily move trigger | 3% |
+| Opening gap trigger | 2% |
+| Intraday range trigger | 3.5% |
+| Relative volume trigger | 1.5× |
+| High/medium/low target | 20% / 12% / 6% |
+| Maximum simultaneous positions | 4 |
+| Minimum cash buffer | 10% |
+| Daily/weekly entry halt | 5% / 10% |
+
+These are not recommendations.
+
+## State and audit trail
+
+- `pending_proposals.jsonl` is replaced by each successful Phase A run.
+- `trade_log.jsonl` is append-only and controls idempotency, dry-run count,
+  take-profit state, and re-entry state.
+- `trade_log_recent.md` is only a readable recap; the JSONL log wins if they
+  disagree.
+- `market_scan_latest.json` preserves the exact scanner inputs used by Phase A.
+
+Each cloud run commits its output back to the repository so a fresh later run
+can reconstruct state without relying on local memory.
+
+## Important limitations
+
+- The workflow checks risk on its schedule, not continuously throughout the
+  trading day. It cannot protect against all intraday or overnight gaps.
+- LLM news analysis can be incomplete or wrong even with detailed sourcing.
+- Alpaca news coverage is not exhaustive; primary-source verification still
+  matters.
+- One credential can inspect only its Alpaca account. Cross-broker wash-sale
+  tracking remains the user's responsibility.
+- Paper fills do not perfectly reproduce live liquidity, slippage, or market
+  impact.
+- Git is an audit/state mechanism, not a transactional trading database.
+- No backtest in this repository validates the news-driven selection logic.
 
 ## License
 
-MIT — see `LICENSE`. Provided as-is, with no warranty; see the license
-for the full disclaimer.
+MIT. See `LICENSE`. Provided as-is, without financial advice or warranty.

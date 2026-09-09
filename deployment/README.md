@@ -6,12 +6,12 @@ unattended live execution service.
 
 ## Runtime connections
 
-- GPT-6 Astra runs through the operator's selected ChatGPT/Codex environment.
+- Claude runs through the operator's selected Claude Code environment.
 - Alpaca credentials provide read-only SIP market data and news.
-- Robinhood MCP must be authorized separately in the exact environment that
-  runs the scheduled task. A connection in another chat does not provide this
-  repository with reusable OAuth credentials.
-- Do not copy OAuth tokens from ChatGPT private storage or use an unofficial
+- Robinhood MCP must be authorized separately in the exact Claude Code
+  environment that runs the scheduled task. A connection in ChatGPT or another
+  app does not provide Claude Code with reusable OAuth credentials.
+- Do not copy OAuth tokens from another application's private storage or use an unofficial
   Robinhood login API.
 
 Robinhood's documented Streamable HTTP MCP endpoint is:

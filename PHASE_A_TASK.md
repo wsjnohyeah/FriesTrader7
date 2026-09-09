@@ -1,13 +1,13 @@
-# Phase A — Broad-market discovery and detailed thesis (Codex)
+# Phase A — Broad-market discovery and detailed thesis (Claude Code)
 
 Run this task after the US regular session closes. It performs research only;
 it must never submit, replace, or cancel an order.
 
 ## Runtime contract
 
-- Run in Codex with the automation's model set to `gpt-6-astra`.
-- If that model identifier is unavailable in the host, stop and report the
-  configuration problem. Never silently fall back to Claude or another model.
+- Run as a Claude Code scheduled session using the Claude model selected by the
+  human operator. The repository does not attempt to switch models at runtime.
+- Read `CLAUDE.md` in full before continuing.
 - Read `risk_rules.json` and `candidate_universe.json` fresh on every run.
   Never edit risk rules during a run.
 - Read Alpaca credentials only through `ALPACA_API_KEY_ID` and

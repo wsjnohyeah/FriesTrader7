@@ -1,4 +1,4 @@
-# Phase B — Revalidation, risk enforcement, and Robinhood execution (Codex)
+# Phase B — Revalidation, risk enforcement, and Robinhood execution (Claude Code)
 
 Run approximately five minutes after the US regular session opens. Alpaca SIP
 provides research-grade market data and news; Robinhood MCP is the only source
@@ -6,9 +6,9 @@ of account state and the only permitted order route.
 
 ## Runtime and security contract
 
-- Run in Codex with the automation model set to `gpt-6-astra`.
-- If that model is unavailable, report the configuration problem; do not
-  silently substitute Claude or another model.
+- Run as a Claude Code scheduled session using the Claude model selected by the
+  human operator. The repository does not attempt to switch models at runtime.
+- Read `CLAUDE.md` in full before continuing.
 - Read `risk_rules.json`, `pending_proposals.jsonl`, and `trade_log.jsonl`
   fresh. Never modify risk rules during a scheduled run.
 - Read Alpaca credentials only from `ALPACA_API_KEY_ID` and

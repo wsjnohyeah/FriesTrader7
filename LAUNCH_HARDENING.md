@@ -1,6 +1,6 @@
 # Launch hardening status
 
-This document records the safety boundary of the current GPT-6 Astra + Alpaca
+This document records the safety boundary of the current Claude Code + Alpaca
 data + Robinhood execution branch.
 
 ## Implemented in this repository

@@ -1,8 +1,8 @@
-# FriesTrader7 — GPT-6 Astra + Alpaca data + Robinhood execution
+# FriesTrader7 — Claude Code + Alpaca data + Robinhood execution
 
 FriesTrader7 is a two-phase, auditable trading workflow:
 
-- Codex running `gpt-6-astra` researches and synthesizes decisions.
+- Claude Code researches and synthesizes decisions.
 - Alpaca Pro/SIP is a read-only professional market-data and news source.
 - Robinhood Agentic Trading MCP is the only account and order interface.
 - Deterministic Python scripts enforce technical scanning and risk math.
@@ -18,7 +18,7 @@ Robinhood watchlist + Robinhood positions
 Persistent candidate_universe.json
                          │
                          ▼
- Phase A after close — GPT-6 Astra
+ Phase A after close — Claude Code
  discovery → technical scan → detailed news/filing thesis
                          │
             ┌────────────┴────────────┐
@@ -26,7 +26,7 @@ Persistent candidate_universe.json
  pending_proposals.jsonl    candidate_universe.json
             │
             ▼
- Phase B after next open — GPT-6 Astra
+ Phase B after next open — Claude Code
  Robinhood positions/quotes → exits → entry gates → sizing
             │
             ▼
@@ -71,7 +71,7 @@ Every non-held entry has a sourced reason, next-review date, and expiration.
 `universe_manager.py` validates, deduplicates, expires, and caps the list, so it
 does not grow forever or preserve stale ideas indefinitely.
 
-## Detailed GPT-6 Astra analysis
+## Detailed Claude analysis
 
 Each researched stock requires:
 
@@ -89,9 +89,9 @@ independent corroboration, supportive technical structure, and no unresolved
 material risk flag or data gap. `validate_proposals.py` prevents incomplete
 records from reaching Phase B.
 
-The model is selected in the Codex automation, not by repository text. Set the
-automation model to `gpt-6-astra`. The task reports an error rather than
-silently switching to Claude or another model.
+The model is selected in the Claude Code scheduled-task configuration, not by
+repository text. Choose the Claude model you want there; the task does not
+silently route analysis to a different provider.
 
 ## Data boundaries
 
@@ -125,7 +125,7 @@ All scripts use the Python standard library.
 ## Credentials
 
 The Alpaca key previously posted in a chat should be considered exposed and
-rotated. Do not commit the replacement. Inject the new pair through the Codex
+rotated. Do not commit the replacement. Inject the new pair through the Claude
 runtime or secret manager:
 
 ```bash
@@ -138,8 +138,9 @@ export ALPACA_DATA_FEED='sip'
 `.env` is ignored, but the scripts do not automatically load it. Avoid shell
 tracing while credentials are present.
 
-The Robinhood MCP connection must be available to the scheduled Codex task,
-not only to an unrelated interactive ChatGPT conversation. Do not store
+The Robinhood MCP connection must be authorized in the exact Claude Code
+environment used by the scheduled task. A connection in ChatGPT does not carry
+over automatically. Do not store
 Robinhood credentials in this repository.
 
 ## Initial setup
@@ -175,10 +176,11 @@ python3 scripts/market_scan.py \
 
 An empty optional list can be omitted entirely.
 
-## Scheduling in Codex
+## Scheduling in Claude Code
 
-Create two separate Codex automations, give both the GitHub checkout, Alpaca
-environment secrets, Robinhood MCP connection, and model `gpt-6-astra`.
+Create two separate Claude Code scheduled sessions, give both the GitHub
+checkout, Alpaca environment secrets, and a separately authorized Robinhood
+MCP connection. Select the desired Claude model in that environment.
 
 Suggested schedules in `America/New_York`:
 
@@ -188,7 +190,7 @@ Suggested schedules in `America/New_York`:
 Phase A prompt:
 
 ```text
-Read AGENTS.md and execute PHASE_A_TASK.md exactly. Alpaca is read-only and
+Read CLAUDE.md and execute PHASE_A_TASK.md exactly. Alpaca is read-only and
 Robinhood order tools are forbidden in this phase. Commit and push only the
 named output files.
 ```
@@ -196,7 +198,7 @@ named output files.
 Phase B prompt:
 
 ```text
-Read AGENTS.md and execute PHASE_B_TASK.md exactly. Alpaca is data-only.
+Read CLAUDE.md and execute PHASE_B_TASK.md exactly. Alpaca is data-only.
 Robinhood MCP is the only account and order route. A live order is authorized
 only when every documented gate passes. Commit and push only the named logs.
 ```

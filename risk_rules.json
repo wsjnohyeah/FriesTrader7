@@ -1,9 +1,12 @@
 {
-  "_comment": "Hard limits for the Codex + Alpaca-data + Robinhood-execution workflow. The agent may read but must never modify this file during a scheduled run.",
+  "_comment": "Hard limits for the Claude Code + Alpaca-data + Robinhood-execution workflow. The agent may read but must never modify this file during a scheduled run.",
   "analysis_model": {
-    "provider": "openai",
-    "model_id": "gpt-6-astra",
-    "selection_location": "Codex automation configuration",
+    "provider": "anthropic",
+    "runtime": "claude_code",
+    "model_family": "claude",
+    "model_id": null,
+    "model_selected_by_human": true,
+    "selection_location": "Claude Code scheduled-task configuration",
     "fallback_allowed": false
   },
   "market_data": {

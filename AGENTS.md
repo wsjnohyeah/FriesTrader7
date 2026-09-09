@@ -1,14 +1,8 @@
-# FriesTrader7 Codex instructions
+# FriesTrader7 compatibility instructions
 
-This repository is a Codex-operated hybrid workflow: Alpaca supplies read-only
-professional market data and Robinhood MCP supplies account state and orders.
-
-## Model
-
-Scheduled tasks are intended to run with `gpt-6-astra`, selected in the Codex
-automation configuration. A prompt or repository file cannot switch the host
-model. If the requested model is unavailable, report that fact; do not silently
-substitute Claude or claim that another model is `gpt-6-astra`.
+Claude Code is the configured runtime. Read and follow `CLAUDE.md` as the
+canonical repository instruction file before running either phase. This file
+exists only so other repository-aware agents receive the same safety boundary.
 
 ## Safety
 
@@ -29,7 +23,7 @@ substitute Claude or claim that another model is `gpt-6-astra`.
 ## Source of truth
 
 - `PHASE_A_TASK.md`: after-close discovery and detailed thesis.
-- `PHASE_B_TASK.md`: after-open risk checks and paper execution.
+- `PHASE_B_TASK.md`: after-open risk checks and Robinhood execution.
 - `risk_rules.json`: human-owned limits.
 - `scripts/*.py`: deterministic data access and risk calculations.
 - `trade_log.jsonl`: append-only audit trail.

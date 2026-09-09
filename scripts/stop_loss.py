@@ -12,6 +12,7 @@ import argparse
 import json
 import statistics
 import sys
+from risk_validation import emit, reject, validate_args
 
 
 def parse_float_list(s):
@@ -53,6 +54,23 @@ def main():
                     help="entry date of the current holding period, passed through for logging")
 
     args = p.parse_args()
+    validate_args(
+        args,
+        positive=(
+            "average_cost", "current_price", "hard_stop_pct",
+            "volatility_multiplier", "min_stop_pct", "max_stop_pct",
+            "fallback_stop_pct",
+        ),
+        fractions=("hard_stop_pct", "min_stop_pct", "max_stop_pct", "fallback_stop_pct"),
+        prices=("daily_closes", "daily_highs"),
+    )
+    if args.min_bars < 3:
+        reject("min-bars must be at least 3 for sample standard deviation")
+    if args.mode == "volatility_scaled" and None not in (
+        args.min_stop_pct, args.max_stop_pct, args.fallback_stop_pct,
+    ):
+        if not args.min_stop_pct <= args.fallback_stop_pct <= args.max_stop_pct:
+            reject("stop thresholds must satisfy min <= fallback <= max")
 
     if args.mode == "fixed" and args.hard_stop_pct is None:
         print(json.dumps({"error": "--hard-stop-pct is required when --mode fixed"}), file=sys.stderr)
@@ -116,7 +134,7 @@ def main():
     result["triggered"] = triggered
     result["action"] = "sell_full_position" if triggered else "hold_monitor"
 
-    print(json.dumps(result))
+    emit(result)
 
 
 if __name__ == "__main__":

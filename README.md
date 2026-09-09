@@ -216,8 +216,19 @@ dates are counted. After at least the configured minimum—10 by default—revie
 - position sizing, cash buffer, and duplicate-order behavior;
 - the final `trade_log.jsonl` against Robinhood account history.
 
-Only the human may then change `execution.mode` from `dry_run` to `live`.
-The agent must never make that change itself.
+Ten validated cycles are necessary but not sufficient for unattended live
+execution. The checked-in `execution.live_prerequisites` remain false until a
+deployment supplies and tests a durable order-intent journal, single-run lock,
+startup broker reconciliation, and ambiguous-submission recovery. Only after
+those controls exist may the human set every prerequisite true and change
+`execution.mode` from `dry_run` to `live`. The agent must never make those
+changes itself. See `LAUNCH_HARDENING.md` and `deployment/README.md`.
+
+Run the offline calculator regression suite with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 ## Default limits
 
@@ -247,6 +258,8 @@ These values are examples, not recommendations.
   averages unexplained buy-side discrepancies.
 - Wash-sale visibility is limited to accounts the Robinhood MCP can inspect.
 - Git is an audit/state mechanism, not a transactional trading database.
+- The Markdown phase specifications guide an agent; they do not by themselves
+  close the crash window between broker acceptance and durable local logging.
 - No backtest here validates news-driven stock selection.
 
 ## License

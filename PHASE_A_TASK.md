@@ -177,6 +177,7 @@ must include all fields below:
   "risk_flags": ["fixed tags only"],
   "data_gaps": ["Material item that could not be verified"],
   "current_price": 0.0,
+  "quote_asof": "RFC 3339 timestamp for the exact Alpaca quote used",
   "proposal_expires_after": "next regular-session open"
 }
 ```
@@ -210,6 +211,10 @@ Conviction rubric:
 
 Never use model confidence, writing fluency, or number of articles as evidence.
 Do not produce price targets. Do not present forecasts as facts.
+
+`current_price` must be the positive finite Alpaca price actually used in the
+thesis, and `quote_asof` must be that quote's timezone-aware source timestamp.
+Never reconstruct either field later from prose or a different quote.
 
 ## Step 5 — Maintain the independent candidate pool
 
@@ -256,7 +261,10 @@ leave the existing pool unchanged and do not improvise the state transition.
 ## Step 6 — Validate and publish
 
 Overwrite `pending_proposals.jsonl` atomically: write a temporary file, validate
-it, then replace the old file only after validation passes.
+it, then replace the old file only after validation passes. Never truncate the
+last complete proposal file at startup. An older complete file is retained for
+audit/recovery but is not fresh buy authorization; Phase B keys decisions to
+its proposal date and rejects missing or invalid original quote metadata.
 
 ```bash
 python3 scripts/validate_proposals.py pending_proposals.new.jsonl \

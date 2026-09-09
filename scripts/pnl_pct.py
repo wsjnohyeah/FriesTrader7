@@ -9,6 +9,7 @@ denominator remains the human-maintained starting_capital_usd.
 import argparse
 import json
 import sys
+from risk_validation import emit, validate_args
 
 
 def main():
@@ -26,6 +27,11 @@ def main():
     p.add_argument("--weekly-limit-pct", type=float, required=True,
                     help="risk_rules.json loss_limits.weekly_loss_limit_pct_of_account")
     args = p.parse_args()
+    validate_args(
+        args,
+        positive=("starting_capital_usd", "daily_limit_pct", "weekly_limit_pct"),
+        fractions=("daily_limit_pct", "weekly_limit_pct"),
+    )
 
     if args.starting_capital_usd <= 0:
         print(json.dumps({"error": "starting_capital_usd must be positive"}), file=sys.stderr)
@@ -43,12 +49,12 @@ def main():
     if weekly_breach:
         reasons.append(f"weekly drawdown {(-weekly_pnl_pct):.4%} >= weekly limit {args.weekly_limit_pct:.4%}")
 
-    print(json.dumps({
+    emit({
         "daily_pnl_pct": round(daily_pnl_pct, 6),
         "weekly_pnl_pct": round(weekly_pnl_pct, 6),
         "entries_halted": daily_breach or weekly_breach,
         "halt_reason": "; ".join(reasons) if reasons else None,
-    }))
+    })
 
 
 if __name__ == "__main__":

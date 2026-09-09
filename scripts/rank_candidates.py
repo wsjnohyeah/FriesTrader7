@@ -15,6 +15,7 @@ Output is meant to be piped straight into position_sizing.py's stdin.
 """
 import json
 import sys
+from risk_validation import emit, load_candidates
 
 CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
 MISSING_RISK_FLAGS_SENTINEL = 10 ** 9
@@ -36,11 +37,7 @@ def sort_key(candidate):
 
 
 def main():
-    try:
-        candidates = json.load(sys.stdin)
-    except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"invalid candidates JSON on stdin: {e}"}), file=sys.stderr)
-        sys.exit(1)
+    candidates = load_candidates(sys.stdin)
 
     for c in candidates:
         if c.get("conviction") not in CONVICTION_RANK:
@@ -49,7 +46,7 @@ def main():
             sys.exit(1)
 
     candidates.sort(key=sort_key)
-    print(json.dumps(candidates))
+    emit(candidates)
 
 
 if __name__ == "__main__":

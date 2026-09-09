@@ -9,6 +9,7 @@ import argparse
 import datetime
 import json
 import sys
+from risk_validation import emit, reject, validate_args, validate_finite
 
 
 def parse_date(s):
@@ -45,6 +46,21 @@ def main():
     p.add_argument("--trading-days-since-sell", type=int)
 
     args = p.parse_args()
+    closes = [float(c) for c in args.daily_closes.split(",") if c.strip()]
+    validate_finite(closes, "daily_closes")
+    if not closes or any(value <= 0 for value in closes):
+        reject("daily-closes must contain positive finite prices")
+    validate_args(
+        args,
+        positive=("fresh_ask", "thesis_price", "last_sell_price"),
+        nonnegative=(
+            "entry_price_gap_max_pct", "max_extension_pct",
+            "wash_sale_lookback_days", "reentry_lock_max_trading_days",
+            "trading_days_since_sell",
+        ),
+    )
+    if args.last_sell_date and args.last_sell_date > args.today:
+        reject("last-sell-date must not be in the future")
     result = {}
 
     gap_pct = (args.fresh_ask - args.thesis_price) / args.thesis_price
@@ -53,10 +69,6 @@ def main():
         "blocked": gap_pct > args.entry_price_gap_max_pct,
     }
 
-    closes = [float(c) for c in args.daily_closes.split(",") if c.strip()]
-    if not closes:
-        print(json.dumps({"error": "daily-closes must be non-empty"}), file=sys.stderr)
-        sys.exit(1)
     moving_avg = sum(closes) / len(closes)
     extension_pct = (args.fresh_ask - moving_avg) / moving_avg
     result["entry_extension"] = {
@@ -69,7 +81,10 @@ def main():
     matching_loss_sale_date = None
     if args.wash_sale_enabled:
         for d in (parse_date(s) for s in args.loss_sale_dates.split(",") if s.strip()):
-            if (args.today - d).days <= args.wash_sale_lookback_days:
+            age_days = (args.today - d).days
+            if age_days < 0:
+                reject("loss-sale-dates must not contain future dates")
+            if age_days <= args.wash_sale_lookback_days:
                 wash_sale_blocked = True
                 matching_loss_sale_date = d.isoformat()
                 break
@@ -90,7 +105,7 @@ def main():
             print(json.dumps({"error": "--last-sell-was-gain required with "
                                         "--last-sell-reason"}), file=sys.stderr)
             sys.exit(1)
-        price_locked = args.fresh_ask > args.last_sell_price
+        price_locked = args.fresh_ask >= args.last_sell_price
         if args.last_sell_was_gain == "false":
             reentry_locked = price_locked
         else:
@@ -100,7 +115,7 @@ def main():
                                             "gain-closed sell"}), file=sys.stderr)
                 sys.exit(1)
             time_cleared = args.trading_days_since_sell >= args.reentry_lock_max_trading_days
-            reentry_locked = price_locked and not time_cleared
+            reentry_locked = not time_cleared
         reentry_detail = {
             "reason": args.last_sell_reason,
             "sell_price": args.last_sell_price,
@@ -119,7 +134,7 @@ def main():
     result["blocking_conditions"] = blocking
     result["action"] = "buy_ok" if result["passed"] else "skip_buy"
 
-    print(json.dumps(result))
+    emit(result)
 
 
 if __name__ == "__main__":

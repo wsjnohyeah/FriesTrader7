@@ -25,17 +25,30 @@ Determine the real US/Eastern date, weekday, and time through the shell. Use
 Robinhood market-hours data when available to confirm that this is a trading
 day and the regular session is open.
 
-Read every `stage == "thesis"` proposal. If the file is missing or empty,
-append a zero-count `cycle_summary` and stop.
+Validate `pending_proposals.jsonl` with `scripts/validate_proposals.py`, then
+read every `stage == "thesis"` proposal. If the file is missing, empty,
+invalid, or incomplete, use an empty candidate list and halt every new entry
+and top-up. Log the input failure, then continue through Robinhood account,
+position, outstanding-order, stop-loss, take-profit, and sell-execution checks.
+Never skip held-position risk because Phase A failed. Without a fresh valid
+thesis, skip thesis-driven conviction trims and `exit_existing` decisions.
+Always finish with the cycle summary.
+
+Determine the immediately preceding completed US trading session from market
+calendar data. Only proposals whose `date` belongs to that session and whose
+`quote_asof` identifies the recorded Phase A quote are fresh buy authorization.
+Treat older/future dates or missing/mismatched quote metadata as invalid input;
+never carry an unprocessed old proposal forward into a later buy.
 
 Skip proposal processing when `trade_log.jsonl` already contains a
 `risk_check` or `order` for the same symbol and `proposal_date`. The proposal's
 own date—not today's date—is the idempotency key. Stop-loss and take-profit
 checks still run every cycle for every live position.
 
-Count distinct dates having a `cycle_summary` with `mode == "dry_run"`. At
-least `execution.dry_run_min_cycles_before_live` are required before the live
-gate can open.
+Count distinct dates having a `cycle_summary` with `mode == "dry_run"` and
+`validated == true`. Missing `validated` is not true. At least
+`execution.dry_run_min_cycles_before_live` validated dates are required before
+the live gate can open; failed or incomplete runs earn no credit.
 
 ## Step 1 — Load Robinhood account state
 
@@ -88,8 +101,15 @@ an Alpaca/Robinhood quote disagreement may block a risk-reducing sell.
 ### Tiered take profit
 
 Run `scripts/take_profit.py` with Robinhood average cost, fresh Robinhood bid,
-quantity, configured tiers, and tiers already fired during this holding
-period. Use its cascading quantities verbatim.
+quantity, configured tiers, and completed tiers during this holding period.
+Recover completion from broker-confirmed fills, not from a local
+`take_profit.triggered` decision. Dry-run, rejected, cancelled, and unfilled
+orders consume no tier. A partial fill consumes only its confirmed quantity;
+retain the original tier target remainder and reconcile the outstanding order
+before considering another sell. Only fully completed tier targets belong in
+`--already-fired`. If completion cannot be established, halt entries and flag
+the tier for manual reconciliation while still evaluating an independent
+stop-loss against unreserved shares.
 
 ### Conviction trim
 
@@ -123,6 +143,8 @@ The live-order gate requires all of:
 3. a non-blocking Robinhood order review;
 4. fresh Robinhood account, position, and quote data;
 5. no duplicate/conflicting Robinhood order.
+6. every `execution.live_prerequisites` flag is true, based on an actually
+   implemented and tested deployment layer; documentation alone is not enough.
 
 In `dry_run`, log `would_execute: true` and never call
 `place_equity_order`. If live mode is configured but any gate fails, log the
@@ -132,7 +154,12 @@ When the gate is open, call Robinhood `place_equity_order` with exactly the
 reviewed parameters. Confirm the result using `get_equity_orders` and the
 returned order id. If not terminal, wait approximately 15 seconds and check
 once more. Never poll more than twice and never label an unconfirmed order as
-filled. Log estimated bid/quantity and actual order state/fill separately.
+filled. `partially_filled` is not terminal: persist cumulative fill, remaining
+quantity, and reserved exposure for startup reconciliation. An unknown or
+timeout outcome must never trigger an automatic resubmission. Log estimated
+bid/quantity and actual order state/fill separately. Proposal-driven orders
+carry `proposal_date`; a position-risk sell without a current proposal uses
+`proposal_date: null` plus its holding-period and durable order-intent ids.
 
 Loss-limit and wash-sale rules never block a risk-reducing sell. For a sell at
 a loss, inspect every configured `wash_sale_avoidance.linked_accounts` account
@@ -249,8 +276,13 @@ checks include both provider names and timestamps.
 Append exactly one final line:
 
 ```json
-{"date":"YYYY-MM-DD","timestamp":"HH:mm:ss","stage":"cycle_summary","mode":"dry_run|live","candidates_considered":0,"orders_reviewed":0,"orders_placed":0,"orders_filled":0,"errors":[]}
+{"date":"YYYY-MM-DD","timestamp":"HH:mm:ss","stage":"cycle_summary","mode":"dry_run|live","validated":false,"candidates_considered":0,"orders_reviewed":0,"orders_placed":0,"orders_filled":0,"errors":[]}
 ```
+
+Set `validated: true` only when required input loading, held-position checks,
+loss-limit checks, candidate decisions, and durable logging all completed.
+Zero-candidate complete runs may qualify; missing proposals, unresolved
+orders, input failures, or unverified risk checks do not.
 
 Regenerate `trade_log_recent.md` as a readable recap without making new
 decisions. `trade_log.jsonl` remains authoritative.
@@ -268,3 +300,7 @@ conflict.
 - Never place a Robinhood order unless every live-order gate condition passes.
 - Never let LLM conviction override a script failure or rejection.
 - Never fabricate missing fundamental, market, news, portfolio, or fill data.
+- The Markdown workflow is not a transactional execution engine. Keep live
+  prerequisites false until a durable intent journal, single-run lock, startup
+  reconciliation, and ambiguous-submission recovery have been implemented and
+  tested against the actual Robinhood MCP behavior.

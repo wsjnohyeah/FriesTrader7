@@ -20,12 +20,15 @@ Candidate JSON is read from stdin, an array of objects:
 import argparse
 import json
 import sys
+from risk_validation import emit, load_candidates, reject, validate_args
 
 
 def parse_pct_map(s):
     out = {}
     for part in s.split(","):
         tier, pct = part.split(":")
+        if tier in out:
+            reject("duplicate conviction tier")
         out[tier] = float(pct)
     return out
 
@@ -48,12 +51,21 @@ def main():
     p.add_argument("--conviction-pct", type=parse_pct_map, required=True,
                     help='fixed conviction-tier sizing table, e.g. "high:0.20,medium:0.12,low:0.06"')
     args = p.parse_args()
+    validate_args(
+        args,
+        positive=("total_value", "max_position_pct", "max_concurrent_positions"),
+        nonnegative=(
+            "cash_start", "concurrent_positions_start", "min_top_up_usd",
+            "min_top_up_pct_of_target",
+        ),
+        fractions=("max_position_pct", "min_cash_buffer_pct", "min_top_up_pct_of_target"),
+    )
+    if set(args.conviction_pct) != {"high", "medium", "low"} or any(
+        not 0 < value <= 1 for value in args.conviction_pct.values()
+    ):
+        reject("conviction-pct must define high, medium and low fractions in (0, 1]")
 
-    try:
-        candidates = json.load(sys.stdin)
-    except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"invalid candidates JSON on stdin: {e}"}), file=sys.stderr)
-        sys.exit(1)
+    candidates = load_candidates(sys.stdin, sizing=True)
 
     cash_remaining = args.cash_start
     concurrent_positions_after = args.concurrent_positions_start
@@ -186,11 +198,11 @@ def main():
             print(json.dumps({"error": f"unknown group '{group}' for symbol {symbol}"}), file=sys.stderr)
             sys.exit(1)
 
-    print(json.dumps({
+    emit({
         "results": results,
         "cash_remaining_final": round(cash_remaining, 2),
         "concurrent_positions_after_final": concurrent_positions_after,
-    }))
+    })
 
 
 if __name__ == "__main__":

@@ -27,6 +27,12 @@
     "mode": "dry_run",
     "allowed_modes": ["dry_run", "live"],
     "dry_run_min_cycles_before_live": 10,
+    "live_prerequisites": {
+      "durable_order_intent_journal": false,
+      "single_run_lock": false,
+      "startup_order_reconciliation": false,
+      "ambiguous_submission_recovery_tested": false
+    },
     "note": "Only the human may change dry_run to live. The agent must never change this value. Live orders are placed only through the configured Robinhood MCP account."
   },
   "universe": {

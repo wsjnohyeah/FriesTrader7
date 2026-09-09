@@ -12,6 +12,7 @@ tier fired in this same cycle has already reduced it.
 import argparse
 import json
 import sys
+from risk_validation import emit, reject, validate_args
 
 
 def parse_tiers(s):
@@ -42,6 +43,16 @@ def main():
                     help="comma-separated gain_pct values already fired this holding period "
                          "(from a trade_log.jsonl lookup), e.g. '0.15'")
     args = p.parse_args()
+    validate_args(args, positive=("average_cost", "current_price", "quantity"))
+    if any(
+        tier["gain_pct"] <= 0 or not 0 < tier["sell_fraction"] <= 1
+        for tier in args.tiers
+    ):
+        reject("tiers require positive gains and sell fractions in (0, 1]")
+    if len({tier["gain_pct"] for tier in args.tiers}) != len(args.tiers):
+        reject("take-profit gain thresholds must be unique")
+    if any(value <= 0 for value in args.already_fired):
+        reject("already-fired gains must be positive")
 
     if args.average_cost <= 0:
         print(json.dumps({"error": "average_cost must be positive"}), file=sys.stderr)
@@ -74,13 +85,13 @@ def main():
 
     triggered = len(fired_this_cycle) > 0
 
-    print(json.dumps({
+    emit({
         "gain_pct": round(gain_pct, 6),
         "tiers_status": tiers_status,
         "fired_this_cycle": fired_this_cycle,
         "triggered": triggered,
         "action": "sell_partial_position" if triggered else "hold_monitor",
-    }))
+    })
 
 
 if __name__ == "__main__":

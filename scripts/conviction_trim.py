@@ -5,6 +5,7 @@ risk_rules.json/PHASE_B_TASK.md Step 5.
 import argparse
 import json
 import sys
+from risk_validation import emit, validate_args
 
 
 def main():
@@ -20,6 +21,11 @@ def main():
                          "trade_log.jsonl lookup")
     p.add_argument("--min-low-conviction-cycles", type=int, required=True)
     args = p.parse_args()
+    validate_args(
+        args,
+        positive=("current_position_value", "target_size", "min_low_conviction_cycles"),
+        nonnegative=("overweight_trigger_pct", "prior_consecutive_low_overweight_cycles"),
+    )
 
     if args.target_size <= 0:
         print(json.dumps({"error": "target_size must be positive"}), file=sys.stderr)
@@ -32,14 +38,14 @@ def main():
     triggered = qualifies_this_cycle and consecutive_cycles >= args.min_low_conviction_cycles
     trim_dollar_amount = round(args.current_position_value - args.target_size, 2) if triggered else None
 
-    print(json.dumps({
+    emit({
         "overweight_pct": round(overweight_pct, 6),
         "qualifies_this_cycle": qualifies_this_cycle,
         "consecutive_cycles": consecutive_cycles,
         "triggered": triggered,
         "trim_dollar_amount": trim_dollar_amount,
         "action": "sell_partial_position" if triggered else "hold_monitor",
-    }))
+    })
 
 
 if __name__ == "__main__":

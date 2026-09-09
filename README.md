@@ -145,10 +145,6 @@ Robinhood credentials in this repository.
 
 ## Initial setup
 
-For a Claude session that will perform the setup, start with
-`CLAUDE_SETUP_HANDOFF.md`; it contains the complete context-transfer checklist
-and safe smoke-test procedure.
-
 1. Keep the GitHub repository private.
 2. Merge this migration branch.
 3. Rotate the exposed Alpaca key and configure both new environment variables.
